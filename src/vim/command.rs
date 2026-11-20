@@ -46,6 +46,36 @@ pub enum Command {
     RepeatChange {
         count: u32,
     },
+    StartSearch {
+        direction: Direction,
+    },
+    RepeatSearch {
+        reverse: bool,
+        count: u32,
+    },
+    SearchWord {
+        direction: Direction,
+        count: u32,
+    },
+    SetMark {
+        mark: char,
+    },
+    JumpToMark {
+        mark: char,
+        linewise: bool,
+    },
+    JumpOlder {
+        count: u32,
+    },
+    JumpNewer {
+        count: u32,
+    },
+    ChangeOlder {
+        count: u32,
+    },
+    ChangeNewer {
+        count: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

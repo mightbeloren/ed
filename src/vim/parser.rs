@@ -33,6 +33,8 @@ pub struct NormalParser {
     pending_text_object: Option<TextObjectScope>,
     pending_macro_record: bool,
     pending_macro_play: bool,
+    pending_mark_set: bool,
+    pending_mark_jump: Option<bool>,
 }
 
 impl NormalParser {
@@ -69,6 +71,8 @@ impl NormalParser {
         self.pending_text_object = None;
         self.pending_macro_record = false;
         self.pending_macro_play = false;
+        self.pending_mark_set = false;
+        self.pending_mark_jump = None;
     }
 
     pub fn is_operator_pending(&self) -> bool {
@@ -83,7 +87,36 @@ impl NormalParser {
         command
     }
 
+    pub fn jump_command(&mut self, newer: bool) -> Command {
+        let count = self.take_count().unwrap_or(1);
+        self.reset();
+        if newer {
+            Command::JumpNewer { count }
+        } else {
+            Command::JumpOlder { count }
+        }
+    }
+
     fn parse_character(&mut self, character: char) -> Option<Command> {
+        if self.pending_mark_set {
+            self.reset();
+            return character
+                .is_ascii_lowercase()
+                .then_some(Command::SetMark { mark: character });
+        }
+        if let Some(linewise) = self.pending_mark_jump {
+            let count = self.take_count().unwrap_or(1);
+            self.reset();
+            if character == '\'' || character == '`' {
+                return Some(Command::JumpOlder { count });
+            }
+            return character
+                .is_ascii_lowercase()
+                .then_some(Command::JumpToMark {
+                    mark: character,
+                    linewise,
+                });
+        }
         if self.pending_macro_record {
             self.reset();
             return character
@@ -204,6 +237,8 @@ impl NormalParser {
                     self.begin_operator(Operator::Uppercase, 'U');
                     None
                 }
+                ';' => Some(self.change_position(false)),
+                ',' => Some(self.change_position(true)),
                 _ => {
                     self.reset();
                     None
@@ -267,6 +302,24 @@ impl NormalParser {
             'P' => Some(self.paste(false)),
             'u' => Some(self.undo()),
             '.' => Some(self.repeat_change()),
+            '/' => Some(self.start_search(Direction::Forward)),
+            '?' => Some(self.start_search(Direction::Backward)),
+            'n' => Some(self.repeat_search(false)),
+            'N' => Some(self.repeat_search(true)),
+            '*' => Some(self.search_word(Direction::Forward)),
+            '#' => Some(self.search_word(Direction::Backward)),
+            'm' => {
+                self.pending_mark_set = true;
+                None
+            }
+            '\'' => {
+                self.pending_mark_jump = Some(true);
+                None
+            }
+            '`' => {
+                self.pending_mark_jump = Some(false);
+                None
+            }
             'q' => {
                 self.pending_macro_record = true;
                 None
@@ -490,6 +543,39 @@ impl NormalParser {
         command
     }
 
+    fn start_search(&mut self, direction: Direction) -> Command {
+        self.reset();
+        Command::StartSearch { direction }
+    }
+
+    fn repeat_search(&mut self, reverse: bool) -> Command {
+        let command = Command::RepeatSearch {
+            reverse,
+            count: self.take_count().unwrap_or(1),
+        };
+        self.reset();
+        command
+    }
+
+    fn search_word(&mut self, direction: Direction) -> Command {
+        let command = Command::SearchWord {
+            direction,
+            count: self.take_count().unwrap_or(1),
+        };
+        self.reset();
+        command
+    }
+
+    fn change_position(&mut self, newer: bool) -> Command {
+        let count = self.take_count().unwrap_or(1);
+        self.reset();
+        if newer {
+            Command::ChangeNewer { count }
+        } else {
+            Command::ChangeOlder { count }
+        }
+    }
+
     fn complete_text_object(&mut self, object: TextObject) -> Command {
         let pending = self.operator.expect("text object requires an operator");
         let count = multiplied_count(pending.count, self.motion_count.take().unwrap_or(1));
@@ -633,6 +719,60 @@ mod tests {
             })
         );
         assert_eq!(parse_keys("4."), Some(Command::RepeatChange { count: 4 }));
+    }
+
+    #[test]
+    fn parses_search_mark_and_change_list_commands() {
+        assert_eq!(
+            parse_keys("/"),
+            Some(Command::StartSearch {
+                direction: Direction::Forward
+            })
+        );
+        assert_eq!(
+            parse_keys("?"),
+            Some(Command::StartSearch {
+                direction: Direction::Backward
+            })
+        );
+        assert_eq!(
+            parse_keys("3n"),
+            Some(Command::RepeatSearch {
+                reverse: false,
+                count: 3
+            })
+        );
+        assert_eq!(
+            parse_keys("2N"),
+            Some(Command::RepeatSearch {
+                reverse: true,
+                count: 2
+            })
+        );
+        assert_eq!(
+            parse_keys("4*"),
+            Some(Command::SearchWord {
+                direction: Direction::Forward,
+                count: 4
+            })
+        );
+        assert_eq!(parse_keys("ma"), Some(Command::SetMark { mark: 'a' }));
+        assert_eq!(
+            parse_keys("`a"),
+            Some(Command::JumpToMark {
+                mark: 'a',
+                linewise: false
+            })
+        );
+        assert_eq!(
+            parse_keys("'a"),
+            Some(Command::JumpToMark {
+                mark: 'a',
+                linewise: true
+            })
+        );
+        assert_eq!(parse_keys("2g;"), Some(Command::ChangeOlder { count: 2 }));
+        assert_eq!(parse_keys("g,"), Some(Command::ChangeNewer { count: 1 }));
     }
 
     #[test]

@@ -205,6 +205,14 @@ impl Buffer {
         self.completed_transactions.len()
     }
 
+    pub fn last_completed_transaction_start(&self) -> Option<CharOffset> {
+        self.completed_transactions
+            .last()?
+            .edits
+            .first()
+            .map(|edit| edit.start)
+    }
+
     pub fn undo(&mut self) -> Option<CharOffset> {
         let node = self.current_undo;
         let parent = self.undo_nodes.get(node)?.parent?;

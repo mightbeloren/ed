@@ -3,8 +3,10 @@ use std::{collections::HashMap, path::Path};
 use crate::{
     buffer::{Buffer, BufferPosition, CharOffset},
     input::{Key, KeyValue},
+    navigation::{ChangeList, JumpList},
+    search::{self, Search, SearchPrompt},
     vim::{
-        Command, FindMotion, InsertPlacement, Mode, Motion, Operator, OperatorCommand,
+        Command, Direction, FindMotion, InsertPlacement, Mode, Motion, Operator, OperatorCommand,
         RegisterName, RegisterStore, RegisterValue, ResolvedTarget, SelectionShape, Target,
         VimEngine, VisualKind, resolve_motion, resolve_target,
     },
@@ -51,6 +53,11 @@ pub struct Editor {
     last_macro: Option<char>,
     pending_change_keys: Vec<Key>,
     last_change_keys: Vec<Key>,
+    change_list: ChangeList,
+    jump_list: JumpList,
+    marks: HashMap<char, BufferPosition>,
+    search_prompt: Option<SearchPrompt>,
+    last_search: Option<Search>,
     replaying: bool,
 }
 
@@ -89,6 +96,11 @@ impl Editor {
             last_macro: None,
             pending_change_keys: Vec::new(),
             last_change_keys: Vec::new(),
+            change_list: ChangeList::default(),
+            jump_list: JumpList::default(),
+            marks: HashMap::new(),
+            search_prompt: None,
+            last_search: None,
             replaying: false,
         }
     }
@@ -111,6 +123,10 @@ impl Editor {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn prompt_text(&self) -> Option<String> {
+        self.search_prompt.as_ref().map(SearchPrompt::display)
     }
 
     pub fn selection_columns(&self, line: usize) -> Option<(usize, usize)> {
@@ -171,6 +187,7 @@ impl Editor {
     pub fn handle_key(&mut self, key: &Key) {
         if !self.replaying
             && self.recording_macro.is_some()
+            && self.search_prompt.is_none()
             && self.vim.mode() == Mode::Normal
             && matches!(&key.value, KeyValue::Character(value) if value == "q")
         {
@@ -183,6 +200,10 @@ impl Editor {
             && let Some((_, keys)) = &mut self.recording_macro
         {
             keys.push(key.clone());
+        }
+        if self.search_prompt.is_some() {
+            self.handle_search_prompt_key(key);
+            return;
         }
         if !self.replaying && (!self.pending_change_keys.is_empty() || starts_change(key)) {
             self.pending_change_keys.push(key.clone());
@@ -197,25 +218,31 @@ impl Editor {
         match self.vim.mode() {
             Mode::Normal | Mode::OperatorPending => {
                 if let Some(command) = self.vim.normal_command(key) {
-                    self.execute_normal(command);
                     self.message.clear();
+                    self.execute_normal(command);
                 }
             }
             Mode::VisualCharacter | Mode::VisualLine | Mode::VisualBlock => {
                 if let Some(command) = self.vim.visual_command(key) {
-                    self.execute_normal(command);
                     self.message.clear();
+                    self.execute_normal(command);
                 }
             }
             Mode::Insert => self.handle_insert_key(key),
             Mode::Replace => self.handle_replace_key(key),
         }
 
-        if !self.replaying
-            && self.buffer.completed_transaction_count() > transactions_before
-            && !self.pending_change_keys.is_empty()
-        {
-            self.last_change_keys = std::mem::take(&mut self.pending_change_keys);
+        if self.buffer.completed_transaction_count() > transactions_before {
+            if let Some(position) = self
+                .buffer
+                .last_completed_transaction_start()
+                .and_then(|offset| self.buffer.offset_to_position(offset).ok())
+            {
+                self.change_list.record(position);
+            }
+            if !self.replaying && !self.pending_change_keys.is_empty() {
+                self.last_change_keys = std::mem::take(&mut self.pending_change_keys);
+            }
         } else if !self.replaying
             && matches!(&key.value, KeyValue::Named(name) if name == "escape")
             && self.vim.mode() == Mode::Normal
@@ -259,10 +286,26 @@ impl Editor {
                 self.play_macro(register, count);
             }
             Command::RepeatChange { count } => self.repeat_change(count),
+            Command::StartSearch { direction } => self.start_search(direction),
+            Command::RepeatSearch { reverse, count } => self.repeat_search(reverse, count),
+            Command::SearchWord { direction, count } => self.search_word(direction, count),
+            Command::SetMark { mark } => {
+                self.pending_change_keys.clear();
+                self.marks.insert(mark, self.cursor.position);
+            }
+            Command::JumpToMark { mark, linewise } => {
+                self.pending_change_keys.clear();
+                self.jump_to_mark(mark, linewise);
+            }
+            Command::JumpOlder { count } => self.jump_older(count),
+            Command::JumpNewer { count } => self.jump_newer(count),
+            Command::ChangeOlder { count } => self.change_older(count),
+            Command::ChangeNewer { count } => self.change_newer(count),
         }
     }
 
     fn execute_motion(&mut self, motion: Motion, count: u32) {
+        let origin = self.cursor.position;
         let desired = self
             .cursor
             .desired_character
@@ -282,6 +325,9 @@ impl Editor {
             self.last_find = Some(find);
         }
         self.cursor.position = outcome.destination;
+        if matches!(motion, Motion::GoToLine { .. } | Motion::MatchingDelimiter) {
+            self.jump_list.record(origin, outcome.destination);
+        }
         self.cursor.desired_character = if matches!(
             motion,
             Motion::Down | Motion::Up | Motion::PageDown | Motion::PageUp | Motion::GoToLine { .. }
@@ -1140,6 +1186,165 @@ impl Editor {
         self.replaying = was_replaying;
     }
 
+    fn start_search(&mut self, direction: Direction) {
+        self.search_prompt = Some(SearchPrompt {
+            direction,
+            query: String::new(),
+        });
+        self.message.clear();
+    }
+
+    fn handle_search_prompt_key(&mut self, key: &Key) {
+        match &key.value {
+            KeyValue::Named(name) if name == "escape" => {
+                self.search_prompt = None;
+                self.message.clear();
+            }
+            KeyValue::Named(name) if name == "backspace" => {
+                if let Some(prompt) = &mut self.search_prompt {
+                    prompt.query.pop();
+                }
+            }
+            KeyValue::Named(name) if name == "enter" => {
+                let Some(prompt) = self.search_prompt.take() else {
+                    return;
+                };
+                let search = if prompt.query.is_empty() {
+                    self.last_search.clone().map(|mut search| {
+                        search.direction = prompt.direction;
+                        search
+                    })
+                } else {
+                    Some(Search {
+                        query: prompt.query,
+                        direction: prompt.direction,
+                        whole_word: false,
+                    })
+                };
+                if let Some(search) = search {
+                    self.last_search = Some(search.clone());
+                    self.execute_search(search, 1);
+                }
+            }
+            KeyValue::Character(text)
+                if !key.modifiers.control && !key.modifiers.alt && !key.modifiers.super_key =>
+            {
+                if let Some(prompt) = &mut self.search_prompt {
+                    prompt.query.push_str(text);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn repeat_search(&mut self, reverse: bool, count: u32) {
+        let Some(mut search) = self.last_search.clone() else {
+            self.message = "No previous search".to_owned();
+            return;
+        };
+        if reverse {
+            search.direction = opposite(search.direction);
+        }
+        self.execute_search(search, count);
+    }
+
+    fn search_word(&mut self, direction: Direction, count: u32) {
+        let Some(query) = search::word_under_cursor(&self.buffer, self.cursor.position) else {
+            self.message = "No word under cursor".to_owned();
+            return;
+        };
+        let search = Search {
+            query,
+            direction,
+            whole_word: true,
+        };
+        self.last_search = Some(search.clone());
+        self.execute_search(search, count);
+    }
+
+    fn execute_search(&mut self, search: Search, count: u32) {
+        let origin = self.cursor.position;
+        let Some(destination) = search::find(&self.buffer, origin, &search, count) else {
+            self.message = format!("Pattern not found: {}", search.query);
+            return;
+        };
+        self.jump_list.record(origin, destination);
+        self.move_to_position(destination);
+        self.message.clear();
+    }
+
+    fn jump_to_mark(&mut self, mark: char, linewise: bool) {
+        let Some(mut destination) = self.marks.get(&mark).copied() else {
+            self.message = format!("Mark not set: {mark}");
+            return;
+        };
+        destination.line = destination
+            .line
+            .min(self.buffer.len_lines().saturating_sub(1));
+        if linewise {
+            destination.character = self.first_non_blank(destination.line);
+        }
+        destination.character = destination
+            .character
+            .min(self.maximum_character(destination.line));
+        let origin = self.cursor.position;
+        self.jump_list.record(origin, destination);
+        self.move_to_position(destination);
+        self.message.clear();
+    }
+
+    fn jump_older(&mut self, count: u32) {
+        if let Some(position) = self.jump_list.older(count) {
+            self.move_to_position(position);
+        } else {
+            self.message = "At oldest jump".to_owned();
+        }
+    }
+
+    fn jump_newer(&mut self, count: u32) {
+        if let Some(position) = self.jump_list.newer(count) {
+            self.move_to_position(position);
+        } else {
+            self.message = "At newest jump".to_owned();
+        }
+    }
+
+    fn change_older(&mut self, count: u32) {
+        if let Some(position) = self.change_list.older(count) {
+            self.move_to_position(position);
+        } else {
+            self.message = "At oldest change".to_owned();
+        }
+    }
+
+    fn change_newer(&mut self, count: u32) {
+        if let Some(position) = self.change_list.newer(count) {
+            self.move_to_position(position);
+        } else {
+            self.message = "At newest change".to_owned();
+        }
+    }
+
+    fn move_to_position(&mut self, mut position: BufferPosition) {
+        position.line = position.line.min(self.buffer.len_lines().saturating_sub(1));
+        position.character = position
+            .character
+            .min(self.maximum_character(position.line));
+        self.cursor.position = position;
+        self.cursor.desired_character = None;
+        self.ensure_cursor_visible();
+    }
+
+    fn first_non_blank(&self, line: usize) -> usize {
+        self.buffer
+            .line_text(line)
+            .unwrap_or_default()
+            .chars()
+            .take_while(|character| character.is_whitespace())
+            .count()
+            .min(self.maximum_character(line))
+    }
+
     fn save(&mut self) {
         self.message = match self.buffer.save() {
             Ok(()) => format!("Wrote {}", self.buffer.display_name()),
@@ -1238,6 +1443,13 @@ impl Editor {
         } else if cursor_character >= self.viewport.left_character + self.visible_columns {
             self.viewport.left_character = cursor_character + 1 - self.visible_columns;
         }
+    }
+}
+
+fn opposite(direction: Direction) -> Direction {
+    match direction {
+        Direction::Forward => Direction::Backward,
+        Direction::Backward => Direction::Forward,
     }
 }
 
@@ -1797,6 +2009,113 @@ mod tests {
                 character: 4
             }
         );
+    }
+
+    #[test]
+    fn search_prompt_repeats_and_reverses_wrapping_searches() {
+        let mut editor = editor_with_text("one two one three one");
+
+        type_keys(&mut editor, "/one");
+        assert_eq!(editor.prompt_text().as_deref(), Some("/one"));
+        editor.handle_key(&named("enter"));
+        assert_eq!(editor.cursor.position.character, 8);
+
+        type_keys(&mut editor, "n");
+        assert_eq!(editor.cursor.position.character, 18);
+        type_keys(&mut editor, "N");
+        assert_eq!(editor.cursor.position.character, 8);
+
+        type_keys(&mut editor, "?two");
+        editor.handle_key(&named("backspace"));
+        type_keys(&mut editor, "o");
+        editor.handle_key(&named("enter"));
+        assert_eq!(editor.cursor.position.character, 4);
+
+        type_keys(&mut editor, "/cancelled");
+        editor.handle_key(&named("escape"));
+        assert_eq!(editor.prompt_text(), None);
+        assert_eq!(editor.cursor.position.character, 4);
+    }
+
+    #[test]
+    fn visual_search_moves_the_active_selection_end() {
+        let mut editor = editor_with_text("one two one");
+
+        type_keys(&mut editor, "v/one");
+        editor.handle_key(&named("enter"));
+
+        assert_eq!(editor.mode(), Mode::VisualCharacter);
+        assert_eq!(editor.cursor.position.character, 8);
+        assert_eq!(editor.selection_columns(0), Some((0, 8)));
+    }
+
+    #[test]
+    fn failed_navigation_commands_leave_an_actionable_message() {
+        let mut editor = editor_with_text("one");
+
+        type_keys(&mut editor, "n");
+        assert_eq!(editor.message(), "No previous search");
+        type_keys(&mut editor, "`a");
+        assert_eq!(editor.message(), "Mark not set: a");
+    }
+
+    #[test]
+    fn word_search_uses_keyword_boundaries_and_counts() {
+        let mut editor = editor_with_text("item items item x item");
+
+        type_keys(&mut editor, "*");
+        assert_eq!(editor.cursor.position.character, 11);
+        type_keys(&mut editor, "#");
+        assert_eq!(editor.cursor.position.character, 0);
+        type_keys(&mut editor, "2*");
+        assert_eq!(editor.cursor.position.character, 18);
+    }
+
+    #[test]
+    fn marks_support_exact_and_linewise_jumps() {
+        let mut editor = editor_with_text("  alpha\nbeta\ngamma");
+
+        type_keys(&mut editor, "4lmaG`a");
+        assert_eq!(
+            editor.cursor.position,
+            BufferPosition {
+                line: 0,
+                character: 4
+            }
+        );
+
+        type_keys(&mut editor, "G'a");
+        assert_eq!(
+            editor.cursor.position,
+            BufferPosition {
+                line: 0,
+                character: 2
+            }
+        );
+    }
+
+    #[test]
+    fn jump_list_traverses_searches_and_line_jumps() {
+        let mut editor = editor_with_text("one\ntwo\nthree");
+
+        type_keys(&mut editor, "G");
+        assert_eq!(editor.cursor.position.line, 2);
+        editor.handle_key(&control_named("o"));
+        assert_eq!(editor.cursor.position.line, 0);
+        editor.handle_key(&control_named("i"));
+        assert_eq!(editor.cursor.position.line, 2);
+    }
+
+    #[test]
+    fn change_list_tracks_committed_change_origins() {
+        let mut editor = editor_with_text("one\ntwo\nthree");
+
+        type_keys(&mut editor, "xjxjxggg;");
+        assert_eq!(editor.cursor.position.line, 2);
+        type_keys(&mut editor, "g;");
+        assert_eq!(editor.cursor.position.line, 1);
+        type_keys(&mut editor, "g,");
+        assert_eq!(editor.cursor.position.line, 2);
     }
 
     #[test]

@@ -88,7 +88,11 @@ pub fn render(editor: &Editor, focused: bool, visible_rows: usize) -> Div {
                 .items_center()
                 .px_2()
                 .bg(rgb(SURFACE))
-                .child(editor.message().to_owned()),
+                .child(
+                    editor
+                        .prompt_text()
+                        .unwrap_or_else(|| editor.message().to_owned()),
+                ),
         )
 }
 

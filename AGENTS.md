@@ -32,7 +32,7 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 
 ## Current phase
 
-Phase 6 is complete:
+Phase 7 is complete:
 
 - Rope-backed file buffer, atomic save, viewport, cursor, and relative line numbers
 - Normal and Insert modes
@@ -50,8 +50,11 @@ Phase 6 is complete:
 - Macro recording, counted playback, and `@@`
 - Dot-repeat for transactional changes
 - Saved/modified state tied to undo-tree history
+- Wrapping literal search through the bottom prompt, including `n`, `N`, `*`, and `#`
+- Local lowercase marks with exact and linewise jumps
+- Counted jump-list and change-list traversal
 
-Phase 7 is next: search, marks, jump list, and change list. See `README.md` for the complete roadmap. Ex commands and `:` minibuffer execution are Phase 8.
+Phase 8 is next: the reusable minibuffer and Ex commands. See `README.md` for the complete roadmap.
 
 ## Phase discipline
 

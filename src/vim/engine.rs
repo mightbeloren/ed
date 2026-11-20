@@ -22,6 +22,12 @@ impl VimEngine {
         if self.mode == Mode::Normal && is_control_key(key, "r") {
             return Some(self.normal.redo_command());
         }
+        if self.mode == Mode::Normal && is_control_key(key, "o") {
+            return Some(self.normal.jump_command(false));
+        }
+        if self.mode == Mode::Normal && is_control_key(key, "i") {
+            return Some(self.normal.jump_command(true));
+        }
         if !matches!(self.mode, Mode::Normal | Mode::OperatorPending) {
             return None;
         }
@@ -127,7 +133,15 @@ impl VimEngine {
 
     fn visual_motion(&mut self, key: &Key) -> Option<Command> {
         match self.normal.parse(key) {
-            Some(command @ Command::Move { .. }) => Some(command),
+            Some(
+                command @ (Command::Move { .. }
+                | Command::StartSearch { .. }
+                | Command::RepeatSearch { .. }
+                | Command::SearchWord { .. }
+                | Command::JumpToMark { .. }
+                | Command::ChangeOlder { .. }
+                | Command::ChangeNewer { .. }),
+            ) => Some(command),
             _ => None,
         }
     }
