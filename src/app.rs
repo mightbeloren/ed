@@ -1,35 +1,31 @@
+use std::path::PathBuf;
+
 use gpui::{
     App, Application, Bounds, Context, FocusHandle, Focusable, Window, WindowBounds, WindowOptions,
-    div, prelude::*, px, rgb, size,
+    prelude::*, px, size,
 };
 
-use crate::input::Key;
-
-const BACKGROUND: u32 = 0x1e1e2e;
-const SURFACE: u32 = 0x313244;
-const STATUS_BACKGROUND: u32 = 0x45475a;
-const TEXT: u32 = 0xcdd6f4;
-const MUTED_TEXT: u32 = 0xa6adc8;
-const ACCENT: u32 = 0x89b4fa;
+use crate::{editor::Editor, input::Key, ui};
 
 pub struct EditorApp {
     focus_handle: FocusHandle,
-    last_key: Option<Key>,
+    editor: Editor,
 }
 
 impl EditorApp {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
+        let editor = path.map(Editor::open).unwrap_or_else(Editor::scratch);
 
         Self {
             focus_handle,
-            last_key: None,
+            editor,
         }
     }
 
-    fn record_key(&mut self, key: Key, cx: &mut Context<Self>) {
-        self.last_key = Some(key);
+    fn handle_key(&mut self, key: Key, cx: &mut Context<Self>) {
+        self.editor.handle_key(&key);
         cx.notify();
     }
 }
@@ -42,67 +38,18 @@ impl Focusable for EditorApp {
 
 impl Render for EditorApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = self.focus_handle.is_focused(window);
-        let key_text = self
-            .last_key
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "press any key".to_owned());
+        let (rows, columns) = ui::visible_geometry(window);
+        self.editor.set_visible_geometry(rows, columns);
 
-        div()
+        ui::render(&self.editor, self.focus_handle.is_focused(window), rows)
             .track_focus(&self.focus_handle(cx))
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(rgb(BACKGROUND))
-            .text_color(rgb(TEXT))
-            .font_family("monospace")
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .flex_col()
-                    .justify_center()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_xl().child("ed"))
-                    .child(
-                        div()
-                            .text_color(rgb(MUTED_TEXT))
-                            .child("Phase 0 — editor viewport placeholder"),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(ACCENT))
-                            .child(format!("Key: {key_text}")),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .h(px(28.0))
-                    .items_center()
-                    .justify_between()
-                    .px_2()
-                    .bg(rgb(STATUS_BACKGROUND))
-                    .child("NORMAL")
-                    .child("[No Name]   1:1")
-                    .child(if focused { "FOCUSED" } else { "UNFOCUSED" }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .h(px(28.0))
-                    .items_center()
-                    .px_2()
-                    .bg(rgb(SURFACE))
-                    .child("minibuffer"),
-            )
     }
 }
 
 pub fn run() {
-    Application::new().run(|cx: &mut App| {
+    let path = std::env::args_os().nth(1).map(PathBuf::from);
+
+    Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1000.0), px(700.0)), cx);
         let window = cx
             .open_window(
@@ -110,7 +57,10 @@ pub fn run() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| EditorApp::new(window, cx)),
+                {
+                    let path = path.clone();
+                    move |window, cx| cx.new(|cx| EditorApp::new(path, window, cx))
+                },
             )
             .expect("failed to open ed window");
 
@@ -120,7 +70,7 @@ pub fn run() {
 
         cx.observe_keystrokes(move |event, _window, cx| {
             editor.update(cx, |editor, cx| {
-                editor.record_key(Key::from(&event.keystroke), cx);
+                editor.handle_key(Key::from(&event.keystroke), cx);
             });
         })
         .detach();
