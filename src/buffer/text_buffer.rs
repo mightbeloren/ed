@@ -55,9 +55,17 @@ pub struct Buffer {
 
 impl Buffer {
     pub fn scratch() -> Self {
+        Self::from_rope(None, Rope::new())
+    }
+
+    pub fn from_text(text: &str) -> Self {
+        Self::from_rope(None, Rope::from_str(text))
+    }
+
+    fn from_rope(path: Option<PathBuf>, text: Rope) -> Self {
         Self {
-            path: None,
-            text: Rope::new(),
+            path,
+            text,
             revision: 0,
             saved_undo: 0,
             untracked_modified: false,
@@ -73,17 +81,7 @@ impl Buffer {
         let file = File::open(&path)?;
         let text = Rope::from_reader(BufReader::new(file))?;
 
-        Ok(Self {
-            path: Some(path),
-            text,
-            revision: 0,
-            saved_undo: 0,
-            untracked_modified: false,
-            active_transaction: None,
-            completed_transactions: Vec::new(),
-            undo_nodes: vec![UndoNode::default()],
-            current_undo: 0,
-        })
+        Ok(Self::from_rope(Some(path), text))
     }
 
     pub fn path(&self) -> Option<&Path> {

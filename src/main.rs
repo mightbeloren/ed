@@ -1,5 +1,6 @@
 mod app;
 pub mod buffer;
+mod dired;
 mod editor;
 mod ex;
 mod input;

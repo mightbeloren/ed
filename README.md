@@ -2,7 +2,7 @@
 
 A Vim-first, keyboard-only text editor for Linux, built in Rust with GPUI.
 
-The project is implemented one validated, committed phase at a time. **Phase 8 is complete.**
+The project is implemented one validated, committed phase at a time. **Phase 9 is complete.**
 
 ## Dependency baseline
 
@@ -18,7 +18,7 @@ All UI text uses JetBrains Mono. The font must be installed on the system.
 cargo run -- path/to/file
 ```
 
-Without a path, `ed` opens an unnamed scratch buffer. `Ctrl-s` atomically saves an opened file; `:w` arrives with Ex commands in Phase 8.
+Without a path, `ed` opens a Dired buffer for the current working directory. Passing a directory opens it in Dired; passing a file opens that file. `Ctrl-s` and `:w` atomically save opened files.
 
 ## Implemented Vim behavior
 
@@ -82,7 +82,7 @@ Insert, Replace, change, and block-insert sessions are grouped into logical edit
 - Reusable bottom minibuffer for search and `:` commands
 - Prompt editing with Backspace, `Ctrl-u`, Enter, and Escape
 - `:w`, `:w!`, `:wq`, and writing to a path
-- `:q` / `:q!` with modified-buffer protection
+- `:q` / `:q!` with modified-buffer protection and return-to-Dired behavior
 - `:e` / `:e!` with safe failure behavior and reload support
 - Line jumps such as `:42`
 - Ranges using line numbers, `.`, `$`, `%`, lowercase marks, and Visual `'<,'>` addresses
@@ -91,6 +91,18 @@ Insert, Replace, change, and block-insert sessions are grouped into logical edit
 - Ranged `:delete`
 
 Ex matching currently uses Rust regex syntax rather than Vim's distinct regex dialect. Ranged writes and the broader Vim Ex grammar remain compatibility-hardening work.
+
+### Dired
+
+- Startup without a path opens the current directory
+- Directory arguments and `:e directory` open Dired buffers
+- Rope-backed, read-only, ls-style directory rows with directories sorted before files
+- Normal Vim motions, counts, search, marks, and yanks remain available
+- Enter opens the selected file or directory
+- Backspace opens the parent directory
+- Mutating Vim and Ex commands are rejected
+- `:q`, `:q!`, and successful `:wq` return file buffers to their containing directory
+- `:q` from Dired closes the editor window
 
 ## UI
 
@@ -116,11 +128,11 @@ There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven 
 | 6 | **Complete** | Branching undo tree, macros, and dot-repeat |
 | 7 | **Complete** | Search (`/`, `?`, `n`, `N`, `*`, `#`), local marks, jump/change lists |
 | 8 | **Complete** | Reusable minibuffer and Ex commands (`:w`, `:q`, `:e`, `:s`, `:g`, ranges) |
-| 9 | Next | Dired directory buffers |
-| 10 | Planned | Async shell runner, output buffers, path jump targets |
+| 9 | **Complete** | Dired directory buffers, startup browsing, file-return quit behavior |
+| 10 | Next | Async shell runner, output buffers, path jump targets |
 | 11 | Planned | Runtime Tree-sitter language plugins and themes |
 | 12 | Planned | Vim compatibility hardening, Unicode/large-file testing, profiling |
 
-Dired directory buffers are the next implementation checkpoint in Phase 9.
+Async shell execution and navigable output buffers are the next implementation checkpoint in Phase 10.
 
 See `AGENTS.md` for architecture constraints and `INSTRUCTIONS.md` for the development and testing workflow.

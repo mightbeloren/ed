@@ -20,7 +20,7 @@ impl EditorApp {
     fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
-        let editor = path.map(Editor::open).unwrap_or_else(Editor::scratch);
+        let editor = path.map(Editor::open).unwrap_or_else(Editor::dired_current);
 
         Self {
             focus_handle,

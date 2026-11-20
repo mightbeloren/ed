@@ -44,6 +44,8 @@ normalized input::Key
 
 Parse and validate an entire Ex command before mutating the buffer. Keep GPUI-specific close behavior behind `EditorRequest` rather than importing GPUI into editor core logic.
 
+Dired is a read-only Rope-backed buffer with filesystem metadata held separately in `dired::DiredState`. Normal Vim navigation still flows through `VimEngine`; only Dired-specific Enter and Backspace keys are intercepted before Vim parsing. Keep filesystem loading in the Dired/editor core rather than UI rendering.
+
 ## Test strategy
 
 Every new Vim feature needs tests at two levels when practical.

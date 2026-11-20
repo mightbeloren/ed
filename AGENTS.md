@@ -4,7 +4,7 @@
 
 `ed` is a Linux-only, Vim-first, keyboard-only text editor written in Rust with GPUI.
 
-There are no menus, toolbars, file-picker dialogs, or mouse-driven editing controls. Files will eventually be browsed through Dired buffers, and commands are entered through the bottom minibuffer.
+There are no menus, toolbars, file-picker dialogs, or mouse-driven editing controls. Files are browsed through Dired buffers, and commands are entered through the bottom minibuffer.
 
 ## Dependency baseline
 
@@ -33,7 +33,7 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 
 ## Current phase
 
-Phase 8 is complete:
+Phase 9 is complete:
 
 - Rope-backed file buffer, atomic save, viewport, cursor, and relative line numbers
 - Normal and Insert modes
@@ -58,8 +58,11 @@ Phase 8 is complete:
 - Typed Ex parser with line, mark, whole-buffer, and Visual ranges
 - Safe `:w`, `:q`, and `:e` file lifecycle commands
 - Transactional regex `:s`, `:g`, `:v`, and ranged delete commands
+- Read-only Rope-backed Dired buffers with ls-style rows
+- Current-directory startup, keyboard entry opening, and parent navigation
+- File quit commands return to Dired; quitting Dired closes the window
 
-Phase 9 is next: Dired directory buffers. See `README.md` for the complete roadmap.
+Phase 10 is next: async shell execution and navigable output buffers. See `README.md` for the complete roadmap.
 
 ## Phase discipline
 

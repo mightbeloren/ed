@@ -7,6 +7,7 @@ use regex::{Regex, RegexBuilder};
 
 use crate::{
     buffer::{Buffer, BufferPosition, CharOffset},
+    dired::{self, DiredCommand, DiredState},
     ex::{self, Address, ExCommand, GlobalAction, RangeSeparator, RangeSpec, Substitute},
     input::{Key, KeyValue},
     minibuffer::{Minibuffer, MinibufferKind},
@@ -40,6 +41,12 @@ pub enum EditorRequest {
 }
 
 #[derive(Clone, Debug)]
+struct DiredReturn {
+    directory: PathBuf,
+    selected_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
 struct BlockInsertState {
     lines: Vec<usize>,
     primary_line: usize,
@@ -49,6 +56,8 @@ struct BlockInsertState {
 
 pub struct Editor {
     buffer: Buffer,
+    dired: Option<DiredState>,
+    dired_return: Option<DiredReturn>,
     cursor: Cursor,
     viewport: Viewport,
     vim: VimEngine,
@@ -76,24 +85,54 @@ pub struct Editor {
 }
 
 impl Editor {
+    #[cfg(test)]
     pub fn scratch() -> Self {
-        Self::with_buffer(Buffer::scratch(), String::new())
+        Self::with_buffer(Buffer::scratch(), None, String::new())
+    }
+
+    pub fn dired_current() -> Self {
+        match std::env::current_dir() {
+            Ok(directory) => Self::dired(directory),
+            Err(error) => Self::with_buffer(
+                Buffer::scratch(),
+                None,
+                format!("Could not determine current directory: {error}"),
+            ),
+        }
+    }
+
+    pub fn dired(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        match DiredState::load(path) {
+            Ok((buffer, dired)) => Self::with_buffer(buffer, Some(dired), String::new()),
+            Err(error) => Self::with_buffer(
+                Buffer::scratch(),
+                None,
+                format!("Could not open directory {}: {error}", path.display()),
+            ),
+        }
     }
 
     pub fn open(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
+        if path.is_dir() {
+            return Self::dired(path);
+        }
         match Buffer::open(path) {
-            Ok(buffer) => Self::with_buffer(buffer, String::new()),
+            Ok(buffer) => Self::with_buffer(buffer, None, String::new()),
             Err(error) => Self::with_buffer(
                 Buffer::scratch(),
+                None,
                 format!("Could not open {}: {error}", path.display()),
             ),
         }
     }
 
-    fn with_buffer(buffer: Buffer, message: String) -> Self {
+    fn with_buffer(buffer: Buffer, dired: Option<DiredState>, message: String) -> Self {
         Self {
             buffer,
+            dired,
+            dired_return: None,
             cursor: Cursor::default(),
             viewport: Viewport::default(),
             vim: VimEngine::default(),
@@ -123,6 +162,17 @@ impl Editor {
 
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
+    }
+
+    pub fn display_name(&self) -> String {
+        self.dired.as_ref().map_or_else(
+            || self.buffer.display_name(),
+            |dired| format!("Dired {}", dired.directory().display()),
+        )
+    }
+
+    pub fn is_dired(&self) -> bool {
+        self.dired.is_some()
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -227,6 +277,12 @@ impl Editor {
             self.track_completed_transaction(transactions_before);
             return;
         }
+        if self.dired.is_some()
+            && let Some(command) = dired::command_for_key(key)
+        {
+            self.execute_dired(command);
+            return;
+        }
         if !self.replaying && (!self.pending_change_keys.is_empty() || starts_change(key)) {
             self.pending_change_keys.push(key.clone());
         }
@@ -264,6 +320,12 @@ impl Editor {
     }
 
     fn execute_normal(&mut self, command: Command) {
+        if self.dired.is_some() && is_mutating_command(command) {
+            self.message = "Dired buffers are read-only".to_owned();
+            self.visual_anchor = None;
+            self.vim.leave_transient_mode();
+            return;
+        }
         match command {
             Command::Move { motion, count } => self.execute_motion(motion, count),
             Command::EnterInsert(placement) => self.enter_insert(placement),
@@ -1387,6 +1449,18 @@ impl Editor {
     }
 
     fn execute_ex(&mut self, command: ExCommand) {
+        if self.dired.is_some()
+            && matches!(
+                &command,
+                ExCommand::Write { .. }
+                    | ExCommand::Substitute { .. }
+                    | ExCommand::Global { .. }
+                    | ExCommand::Delete { .. }
+            )
+        {
+            self.message = "Dired buffers are read-only".to_owned();
+            return;
+        }
         match command {
             ExCommand::GoTo(address) => match self.resolve_address(address) {
                 Ok(line) => {
@@ -1413,16 +1487,10 @@ impl Editor {
                 }
                 let saved = self.write_ex(path.as_deref(), force);
                 if saved && quit {
-                    self.request = Some(EditorRequest::Close);
+                    self.return_to_dired(true);
                 }
             }
-            ExCommand::Quit { force } => {
-                if self.buffer.is_modified() && !force {
-                    self.message = "No write since last change (add ! to override)".to_owned();
-                } else {
-                    self.request = Some(EditorRequest::Close);
-                }
-            }
+            ExCommand::Quit { force } => self.return_to_dired(force),
             ExCommand::Edit { path, force } => self.edit_ex(path.as_deref(), force),
             ExCommand::Substitute {
                 range,
@@ -1450,6 +1518,92 @@ impl Editor {
                 Err(error) => self.message = error,
             },
         }
+    }
+
+    fn execute_dired(&mut self, command: DiredCommand) {
+        let origin_directory = self
+            .dired
+            .as_ref()
+            .map(|dired| dired.directory().to_path_buf());
+        let target = match command {
+            DiredCommand::Open => self
+                .dired
+                .as_ref()
+                .and_then(|dired| dired.entry(self.cursor.position.line))
+                .map(|entry| entry.path.clone()),
+            DiredCommand::Parent => self.dired.as_ref().map(|dired| {
+                dired
+                    .directory()
+                    .parent()
+                    .unwrap_or_else(|| dired.directory())
+                    .to_path_buf()
+            }),
+        };
+        let Some(target) = target else {
+            self.message = "No Dired entry on this line".to_owned();
+            return;
+        };
+        if target.is_dir() {
+            self.open_dired(&target);
+        } else {
+            match Buffer::open(&target) {
+                Ok(buffer) => {
+                    self.replace_buffer(buffer, None);
+                    if let Some(directory) = origin_directory {
+                        self.dired_return = Some(DiredReturn {
+                            directory,
+                            selected_path: target.clone(),
+                        });
+                    }
+                    self.message = format!("Edited {}", target.display());
+                }
+                Err(error) => {
+                    self.message = format!("Could not open {}: {error}", target.display())
+                }
+            }
+        }
+    }
+
+    fn open_dired(&mut self, directory: &Path) {
+        self.open_dired_at(directory, None);
+    }
+
+    fn open_dired_at(&mut self, directory: &Path, selected_path: Option<&Path>) {
+        match DiredState::load(directory) {
+            Ok((buffer, dired)) => {
+                let line = selected_path.and_then(|path| dired.line_for_path(path));
+                self.replace_buffer(buffer, Some(dired));
+                if let Some(line) = line {
+                    self.cursor.position.line = line;
+                    self.ensure_cursor_visible();
+                }
+                self.message = format!("Dired {}", directory.display());
+            }
+            Err(error) => {
+                self.message = format!("Could not open directory {}: {error}", directory.display())
+            }
+        }
+    }
+
+    fn return_to_dired(&mut self, force: bool) {
+        if self.dired.is_some() {
+            self.request = Some(EditorRequest::Close);
+            return;
+        }
+        if self.buffer.is_modified() && !force {
+            self.message = "No write since last change (add ! to override)".to_owned();
+            return;
+        }
+        if let Some(context) = self.dired_return.clone() {
+            self.open_dired_at(&context.directory, Some(&context.selected_path));
+            return;
+        }
+        let directory = self.buffer.path().and_then(containing_directory);
+        let Some(directory) = directory else {
+            self.message = "Could not determine a directory for Dired".to_owned();
+            return;
+        };
+        self.open_dired(&directory);
     }
 
     fn write_ex(&mut self, path: Option<&str>, force: bool) -> bool {
@@ -1494,17 +1648,29 @@ impl Editor {
             self.message = "No file name".to_owned();
             return;
         };
+        if path.is_dir() {
+            match DiredState::load(&path) {
+                Ok((buffer, dired)) => {
+                    self.replace_buffer(buffer, Some(dired));
+                    self.message = format!("Dired {}", path.display());
+                }
+                Err(error) => self.message = format!("Edit failed: {error}"),
+            }
+            return;
+        }
         match Buffer::open(&path) {
             Ok(buffer) => {
-                self.replace_buffer(buffer);
+                self.replace_buffer(buffer, None);
                 self.message = format!("Edited {}", path.display());
             }
             Err(error) => self.message = format!("Edit failed: {error}"),
         }
     }
 
-    fn replace_buffer(&mut self, buffer: Buffer) {
+    fn replace_buffer(&mut self, buffer: Buffer, dired: Option<DiredState>) {
         self.buffer = buffer;
+        self.dired = dired;
+        self.dired_return = None;
         self.cursor = Cursor::default();
         self.viewport = Viewport::default();
         self.vim = VimEngine::default();
@@ -1785,6 +1951,10 @@ impl Editor {
     }
 
     fn save(&mut self) {
+        if self.dired.is_some() {
+            self.message = "Dired buffers are read-only".to_owned();
+            return;
+        }
         self.write_ex(None, false);
     }
 
@@ -1879,6 +2049,28 @@ impl Editor {
         } else if cursor_character >= self.viewport.left_character + self.visible_columns {
             self.viewport.left_character = cursor_character + 1 - self.visible_columns;
         }
+    }
+}
+
+fn containing_directory(path: &Path) -> Option<PathBuf> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+}
+
+fn is_mutating_command(command: Command) -> bool {
+    match command {
+        Command::EnterInsert(_)
+        | Command::DeleteCharacters { .. }
+        | Command::EnterReplace
+        | Command::ReplaceCharacter { .. }
+        | Command::BeginBlockInsert { .. }
+        | Command::Paste { .. }
+        | Command::RepeatChange { .. } => true,
+        Command::Operate(command) => command.operator != Operator::Yank,
+        Command::OperateSelection { operator, .. } => operator != Operator::Yank,
+        _ => false,
     }
 }
 
@@ -2642,9 +2834,114 @@ mod tests {
         execute_ex_keys(&mut editor, "q");
         assert_eq!(editor.take_request(), None);
         execute_ex_keys(&mut editor, "q!");
+        assert!(editor.is_dired());
+        assert_eq!(editor.take_request(), None);
+        execute_ex_keys(&mut editor, "q");
         assert_eq!(editor.take_request(), Some(EditorRequest::Close));
 
         fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn dired_opens_entries_and_returns_from_files_on_quit() {
+        let directory = temporary_directory("dired-open");
+        fs::create_dir(&directory).expect("create test directory");
+        fs::create_dir(directory.join("folder")).expect("create child directory");
+        fs::write(directory.join("file.txt"), "contents").expect("write file fixture");
+
+        let mut editor = Editor::dired(&directory);
+        assert!(editor.is_dired());
+        assert!(
+            editor
+                .display_name()
+                .contains(directory.to_string_lossy().as_ref())
+        );
+
+        type_keys(&mut editor, "2j");
+        editor.handle_key(&named("enter"));
+        assert!(!editor.is_dired());
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("contents"));
+
+        execute_ex_keys(&mut editor, "q");
+        assert!(editor.is_dired());
+        assert_eq!(editor.take_request(), None);
+        assert_eq!(editor.cursor.position.line, 2);
+        assert_eq!(
+            editor
+                .dired
+                .as_ref()
+                .and_then(|dired| dired.entry(editor.cursor.position.line))
+                .map(|entry| entry.path.as_path()),
+            Some(directory.join("file.txt").as_path())
+        );
+
+        execute_ex_keys(&mut editor, "q");
+        assert_eq!(editor.take_request(), Some(EditorRequest::Close));
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn dired_backspace_opens_the_parent_and_mutations_are_blocked() {
+        let directory = temporary_directory("dired-parent");
+        let child = directory.join("child");
+        fs::create_dir_all(&child).expect("create child directory");
+        fs::write(child.join("file.txt"), "contents").expect("write file fixture");
+
+        let mut editor = Editor::dired(&child);
+        let original = editor
+            .buffer
+            .text(CharOffset(0), CharOffset(editor.buffer.len_chars()))
+            .expect("Dired text");
+        type_keys(&mut editor, "x");
+        assert_eq!(editor.message(), "Dired buffers are read-only");
+        assert_eq!(
+            editor
+                .buffer
+                .text(CharOffset(0), CharOffset(editor.buffer.len_chars()))
+                .as_deref(),
+            Some(original.as_str())
+        );
+
+        execute_ex_keys(&mut editor, "%s/file/changed/g");
+        assert_eq!(editor.message(), "Dired buffers are read-only");
+
+        editor.handle_key(&named("backspace"));
+        assert!(editor.is_dired());
+        assert!(
+            editor
+                .display_name()
+                .contains(directory.to_string_lossy().as_ref())
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn write_quit_saves_then_returns_to_dired() {
+        let directory = temporary_directory("dired-write-quit");
+        fs::create_dir(&directory).expect("create test directory");
+        let path = directory.join("file.txt");
+        fs::write(&path, "one").expect("write file fixture");
+
+        let mut editor = Editor::open(&path);
+        type_keys(&mut editor, "A!");
+        editor.handle_key(&named("escape"));
+        execute_ex_keys(&mut editor, "wq");
+
+        assert_eq!(fs::read_to_string(&path).expect("read saved file"), "one!");
+        assert!(editor.is_dired());
+        assert_eq!(editor.take_request(), None);
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn bare_relative_file_paths_fall_back_to_the_current_directory() {
+        assert_eq!(
+            containing_directory(Path::new("file.txt")),
+            std::env::current_dir().ok()
+        );
     }
 
     #[test]
