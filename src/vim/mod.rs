@@ -7,7 +7,7 @@ mod target;
 
 pub use command::{
     Command, Direction, FindMotion, InsertPlacement, Motion, Operator, OperatorCommand,
-    RegisterName, Target,
+    RegisterName, Target, VisualKind,
 };
 pub use engine::VimEngine;
 pub use mode::Mode;

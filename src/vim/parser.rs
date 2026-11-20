@@ -2,7 +2,7 @@ use crate::input::{Key, KeyValue};
 
 use super::{
     Command, Direction, FindMotion, InsertPlacement, Motion, Operator, OperatorCommand,
-    RegisterName, Target,
+    RegisterName, Target, VisualKind,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -29,6 +29,7 @@ pub struct NormalParser {
     register: RegisterName,
     operator: Option<PendingOperator>,
     pending_find: Option<PendingFind>,
+    pending_replace: bool,
 }
 
 impl NormalParser {
@@ -61,6 +62,7 @@ impl NormalParser {
         self.register = RegisterName::Unnamed;
         self.operator = None;
         self.pending_find = None;
+        self.pending_replace = false;
     }
 
     pub fn is_operator_pending(&self) -> bool {
@@ -68,6 +70,13 @@ impl NormalParser {
     }
 
     fn parse_character(&mut self, character: char) -> Option<Command> {
+        if self.pending_replace {
+            self.pending_replace = false;
+            let count = self.take_count().unwrap_or(1);
+            self.reset();
+            return Some(Command::ReplaceCharacter { character, count });
+        }
+
         if self.pending_register {
             self.pending_register = false;
             self.register = match character {
@@ -168,6 +177,18 @@ impl NormalParser {
             '>' => self.wait_for_operator(Operator::Indent, '>'),
             '<' => self.wait_for_operator(Operator::Outdent, '<'),
             '=' => self.wait_for_operator(Operator::Reindent, '='),
+            'x' => Some(self.delete_characters(false)),
+            'X' => Some(self.delete_characters(true)),
+            'v' => Some(self.enter_visual(VisualKind::Character)),
+            'V' => Some(self.enter_visual(VisualKind::Line)),
+            'R' => {
+                self.reset();
+                Some(Command::EnterReplace)
+            }
+            'r' => {
+                self.pending_replace = true;
+                None
+            }
             'i' => Some(self.insert(InsertPlacement::BeforeCursor)),
             'a' => Some(self.insert(InsertPlacement::AfterCursor)),
             'I' => Some(self.insert(InsertPlacement::FirstNonBlank)),
@@ -321,6 +342,20 @@ impl NormalParser {
     fn insert(&mut self, placement: InsertPlacement) -> Command {
         self.reset();
         Command::EnterInsert(placement)
+    }
+
+    fn delete_characters(&mut self, backward: bool) -> Command {
+        let command = Command::DeleteCharacters {
+            count: self.take_count().unwrap_or(1),
+            backward,
+        };
+        self.reset();
+        command
+    }
+
+    fn enter_visual(&mut self, kind: VisualKind) -> Command {
+        self.reset();
+        Command::EnterVisual(kind)
     }
 
     fn take_count(&mut self) -> Option<u32> {

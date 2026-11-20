@@ -1,8 +1,30 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
-    Move { motion: Motion, count: u32 },
+    Move {
+        motion: Motion,
+        count: u32,
+    },
     EnterInsert(InsertPlacement),
     Operate(OperatorCommand),
+    EnterVisual(VisualKind),
+    ExitVisual,
+    SwapVisualEnd,
+    OperateSelection {
+        operator: Operator,
+        register: RegisterName,
+    },
+    DeleteCharacters {
+        count: u32,
+        backward: bool,
+    },
+    EnterReplace,
+    ReplaceCharacter {
+        character: char,
+        count: u32,
+    },
+    BeginBlockInsert {
+        append: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +58,13 @@ pub struct FindMotion {
 pub enum Direction {
     Forward,
     Backward,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VisualKind {
+    Character,
+    Line,
+    Block,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

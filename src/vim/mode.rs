@@ -3,7 +3,11 @@ pub enum Mode {
     #[default]
     Normal,
     Insert,
+    Replace,
     OperatorPending,
+    VisualCharacter,
+    VisualLine,
+    VisualBlock,
 }
 
 impl Mode {
@@ -11,7 +15,11 @@ impl Mode {
         match self {
             Self::Normal => "NORMAL",
             Self::Insert => "INSERT",
+            Self::Replace => "REPLACE",
             Self::OperatorPending => "OPERATOR",
+            Self::VisualCharacter => "VISUAL",
+            Self::VisualLine => "VISUAL LINE",
+            Self::VisualBlock => "VISUAL BLOCK",
         }
     }
 }

@@ -6,6 +6,7 @@ use super::{Direction, FindMotion, Motion, Target};
 pub enum SelectionShape {
     CharacterWise,
     LineWise,
+    BlockWise,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

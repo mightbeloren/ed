@@ -5,8 +5,8 @@ use crate::{
     input::{Key, KeyValue},
     vim::{
         Command, FindMotion, InsertPlacement, Mode, Motion, Operator, OperatorCommand,
-        RegisterStore, RegisterValue, SelectionShape, Target, VimEngine, resolve_motion,
-        resolve_target,
+        RegisterName, RegisterStore, RegisterValue, ResolvedTarget, SelectionShape, Target,
+        VimEngine, VisualKind, resolve_motion, resolve_target,
     },
 };
 
@@ -25,6 +25,14 @@ pub struct Viewport {
     pub left_character: usize,
 }
 
+#[derive(Clone, Debug)]
+struct BlockInsertState {
+    lines: Vec<usize>,
+    primary_line: usize,
+    column: usize,
+    inserted_text: String,
+}
+
 pub struct Editor {
     buffer: Buffer,
     cursor: Cursor,
@@ -32,6 +40,8 @@ pub struct Editor {
     vim: VimEngine,
     registers: RegisterStore,
     last_find: Option<FindMotion>,
+    visual_anchor: Option<BufferPosition>,
+    block_insert: Option<BlockInsertState>,
     insert_session_changed: bool,
     visible_rows: usize,
     visible_columns: usize,
@@ -62,6 +72,8 @@ impl Editor {
             vim: VimEngine::default(),
             registers: RegisterStore::default(),
             last_find: None,
+            visual_anchor: None,
+            block_insert: None,
             insert_session_changed: false,
             visible_rows: DEFAULT_VISIBLE_ROWS,
             visible_columns: DEFAULT_VISIBLE_COLUMNS,
@@ -89,6 +101,47 @@ impl Editor {
         &self.message
     }
 
+    pub fn selection_columns(&self, line: usize) -> Option<(usize, usize)> {
+        let anchor = self.visual_anchor?;
+        let kind = self.vim.visual_kind()?;
+        let head = self.cursor.position;
+        let first_line = anchor.line.min(head.line);
+        let last_line = anchor.line.max(head.line);
+        if line < first_line || line > last_line {
+            return None;
+        }
+        let line_length = self.buffer.line_len_chars(line).unwrap_or(0);
+        let range = match kind {
+            VisualKind::Line => (0, line_length.saturating_sub(1)),
+            VisualKind::Block => {
+                let start = anchor.character.min(head.character).min(line_length);
+                let end = anchor
+                    .character
+                    .max(head.character)
+                    .min(line_length.saturating_sub(1));
+                (start, end)
+            }
+            VisualKind::Character => {
+                let (start_position, end_position) = ordered_positions(anchor, head);
+                let start = if line == start_position.line {
+                    start_position.character
+                } else {
+                    0
+                };
+                let end = if line == end_position.line {
+                    end_position.character
+                } else {
+                    line_length.saturating_sub(1)
+                };
+                (
+                    start.min(line_length),
+                    end.min(line_length.saturating_sub(1)),
+                )
+            }
+        };
+        Some(range)
+    }
+
     pub fn set_visible_geometry(&mut self, rows: usize, columns: usize) {
         self.visible_rows = rows.max(1);
         self.visible_columns = columns.max(1);
@@ -108,7 +161,14 @@ impl Editor {
                     self.message.clear();
                 }
             }
+            Mode::VisualCharacter | Mode::VisualLine | Mode::VisualBlock => {
+                if let Some(command) = self.vim.visual_command(key) {
+                    self.execute_normal(command);
+                    self.message.clear();
+                }
+            }
             Mode::Insert => self.handle_insert_key(key),
+            Mode::Replace => self.handle_replace_key(key),
         }
     }
 
@@ -117,6 +177,20 @@ impl Editor {
             Command::Move { motion, count } => self.execute_motion(motion, count),
             Command::EnterInsert(placement) => self.enter_insert(placement),
             Command::Operate(command) => self.execute_operator(command),
+            Command::EnterVisual(kind) => self.enter_visual(kind),
+            Command::ExitVisual => self.exit_visual(),
+            Command::SwapVisualEnd => self.swap_visual_end(),
+            Command::OperateSelection { operator, register } => {
+                self.operate_selection(operator, register)
+            }
+            Command::DeleteCharacters { count, backward } => {
+                self.delete_characters(count, backward)
+            }
+            Command::EnterReplace => self.enter_replace(),
+            Command::ReplaceCharacter { character, count } => {
+                self.replace_characters(character, count)
+            }
+            Command::BeginBlockInsert { append } => self.begin_block_insert(append),
         }
     }
 
@@ -149,6 +223,313 @@ impl Editor {
             None
         };
         self.ensure_cursor_visible();
+    }
+
+    fn enter_visual(&mut self, kind: VisualKind) {
+        if self.vim.visual_kind() == Some(kind) {
+            self.exit_visual();
+            return;
+        }
+        if self.visual_anchor.is_none() {
+            self.visual_anchor = Some(self.cursor.position);
+        }
+        self.vim.enter_visual(kind);
+    }
+
+    fn exit_visual(&mut self) {
+        self.visual_anchor = None;
+        self.vim.leave_transient_mode();
+        self.clamp_cursor_to_mode();
+    }
+
+    fn swap_visual_end(&mut self) {
+        if let Some(anchor) = &mut self.visual_anchor {
+            std::mem::swap(anchor, &mut self.cursor.position);
+        }
+        self.ensure_cursor_visible();
+    }
+
+    fn visual_targets(&self) -> Vec<ResolvedTarget> {
+        let Some(anchor) = self.visual_anchor else {
+            return Vec::new();
+        };
+        let Some(kind) = self.vim.visual_kind() else {
+            return Vec::new();
+        };
+        let head = self.cursor.position;
+        match kind {
+            VisualKind::Character => {
+                let (start_position, end_position) = ordered_positions(anchor, head);
+                let Ok(start) = self.buffer.position_to_offset(start_position) else {
+                    return Vec::new();
+                };
+                let Ok(end_offset) = self.buffer.position_to_offset(end_position) else {
+                    return Vec::new();
+                };
+                let end = CharOffset((end_offset.0 + 1).min(self.buffer.len_chars()));
+                vec![ResolvedTarget {
+                    start,
+                    end,
+                    shape: SelectionShape::CharacterWise,
+                    cursor: start_position,
+                }]
+            }
+            VisualKind::Line => {
+                let first = anchor.line.min(head.line);
+                let last = anchor.line.max(head.line);
+                let Some(start) = self.buffer.line_start_offset(first) else {
+                    return Vec::new();
+                };
+                let end = self
+                    .buffer
+                    .line_start_offset(last + 1)
+                    .unwrap_or(CharOffset(self.buffer.len_chars()));
+                vec![ResolvedTarget {
+                    start,
+                    end,
+                    shape: SelectionShape::LineWise,
+                    cursor: BufferPosition {
+                        line: first,
+                        character: 0,
+                    },
+                }]
+            }
+            VisualKind::Block => {
+                let first_line = anchor.line.min(head.line);
+                let last_line = anchor.line.max(head.line);
+                let first_column = anchor.character.min(head.character);
+                let last_column = anchor.character.max(head.character);
+                (first_line..=last_line)
+                    .filter_map(|line| {
+                        let line_length = self.buffer.line_len_chars(line)?;
+                        if first_column >= line_length {
+                            return None;
+                        }
+                        let line_start = self.buffer.line_start_offset(line)?;
+                        let start = CharOffset(line_start.0 + first_column);
+                        let end = CharOffset(line_start.0 + (last_column + 1).min(line_length));
+                        Some(ResolvedTarget {
+                            start,
+                            end,
+                            shape: SelectionShape::BlockWise,
+                            cursor: BufferPosition {
+                                line,
+                                character: first_column,
+                            },
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn operate_selection(&mut self, operator: Operator, register: RegisterName) {
+        let kind = self.vim.visual_kind();
+        let targets = self.visual_targets();
+        if targets.is_empty() {
+            self.exit_visual();
+            return;
+        }
+        if matches!(
+            operator,
+            Operator::Delete | Operator::Change | Operator::Yank
+        ) {
+            let text = targets
+                .iter()
+                .filter_map(|target| self.buffer.text(target.start, target.end))
+                .collect::<Vec<_>>()
+                .join(if kind == Some(VisualKind::Block) {
+                    "\n"
+                } else {
+                    ""
+                });
+            self.registers.write(
+                register,
+                RegisterValue {
+                    text,
+                    shape: match kind {
+                        Some(VisualKind::Line) => SelectionShape::LineWise,
+                        Some(VisualKind::Block) => SelectionShape::BlockWise,
+                        _ => SelectionShape::CharacterWise,
+                    },
+                },
+            );
+        }
+
+        match operator {
+            Operator::Yank => self.exit_visual(),
+            Operator::Delete => {
+                self.exit_visual();
+                self.delete_multiple_targets(&targets);
+            }
+            Operator::Change if kind == Some(VisualKind::Block) => {
+                let lines: Vec<_> = targets.iter().map(|target| target.cursor.line).collect();
+                let column = targets[0].cursor.character;
+                self.exit_visual();
+                self.buffer.begin_transaction();
+                for target in targets.iter().rev() {
+                    let _ = self.buffer.remove(target.start, target.end);
+                }
+                self.cursor.position = BufferPosition {
+                    line: lines[0],
+                    character: column,
+                };
+                self.block_insert = Some(BlockInsertState {
+                    lines,
+                    primary_line: self.cursor.position.line,
+                    column,
+                    inserted_text: String::new(),
+                });
+                self.insert_session_changed = true;
+                self.vim.enter_insert();
+            }
+            Operator::Change => {
+                let target = targets[0];
+                self.exit_visual();
+                self.change_target(target);
+            }
+            Operator::Indent | Operator::Outdent | Operator::Reindent => {
+                let mut target = targets[0];
+                if let Some(last) = targets.last() {
+                    target.end = last.end;
+                }
+                self.exit_visual();
+                self.indent_target(target, operator);
+            }
+            Operator::SwapCase | Operator::Lowercase | Operator::Uppercase => {
+                self.exit_visual();
+                for target in targets.iter().rev() {
+                    self.case_target(*target, operator);
+                }
+            }
+        }
+    }
+
+    fn delete_multiple_targets(&mut self, targets: &[ResolvedTarget]) {
+        self.buffer.begin_transaction();
+        for target in targets.iter().rev() {
+            let _ = self.buffer.remove(target.start, target.end);
+        }
+        self.buffer.commit_transaction();
+        let first = targets[0];
+        self.cursor.position = self
+            .buffer
+            .offset_to_position(CharOffset(first.start.0.min(self.buffer.len_chars())))
+            .unwrap_or_default();
+        self.clamp_cursor_to_mode();
+    }
+
+    fn begin_block_insert(&mut self, append: bool) {
+        let Some(anchor) = self.visual_anchor else {
+            return;
+        };
+        let head = self.cursor.position;
+        let first_line = anchor.line.min(head.line);
+        let last_line = anchor.line.max(head.line);
+        let column = if append {
+            anchor.character.max(head.character).saturating_add(1)
+        } else {
+            anchor.character.min(head.character)
+        };
+        let lines: Vec<_> = (first_line..=last_line).collect();
+        self.exit_visual();
+        self.buffer.begin_transaction();
+        self.ensure_line_column(first_line, column);
+        self.cursor.position = BufferPosition {
+            line: first_line,
+            character: column,
+        };
+        self.block_insert = Some(BlockInsertState {
+            lines,
+            primary_line: first_line,
+            column,
+            inserted_text: String::new(),
+        });
+        self.insert_session_changed = false;
+        self.vim.enter_insert();
+    }
+
+    fn delete_characters(&mut self, count: u32, backward: bool) {
+        let line = self.cursor.position.line;
+        let line_length = self.buffer.line_len_chars(line).unwrap_or(0);
+        if line_length == 0 {
+            return;
+        }
+        let count = count.max(1) as usize;
+        let (start_character, end_character) = if backward {
+            let end = self.cursor.position.character;
+            (end.saturating_sub(count), end)
+        } else {
+            let start = self.cursor.position.character;
+            (start, start.saturating_add(count).min(line_length))
+        };
+        if start_character == end_character {
+            return;
+        }
+        let start = self
+            .buffer
+            .position_to_offset(BufferPosition {
+                line,
+                character: start_character,
+            })
+            .expect("valid character deletion start");
+        let end = self
+            .buffer
+            .position_to_offset(BufferPosition {
+                line,
+                character: end_character,
+            })
+            .expect("valid character deletion end");
+        let target = ResolvedTarget {
+            start,
+            end,
+            shape: SelectionShape::CharacterWise,
+            cursor: BufferPosition {
+                line,
+                character: start_character,
+            },
+        };
+        self.registers.write(
+            RegisterName::Unnamed,
+            RegisterValue {
+                text: self.buffer.text(start, end).unwrap_or_default(),
+                shape: SelectionShape::CharacterWise,
+            },
+        );
+        self.delete_target(target);
+    }
+
+    fn enter_replace(&mut self) {
+        self.buffer.begin_transaction();
+        self.insert_session_changed = false;
+        self.vim.enter_replace();
+    }
+
+    fn replace_characters(&mut self, character: char, count: u32) {
+        let line = self.cursor.position.line;
+        let line_length = self.buffer.line_len_chars(line).unwrap_or(0);
+        let count = count.max(1) as usize;
+        let start_character = self.cursor.position.character;
+        if start_character.saturating_add(count) > line_length {
+            return;
+        }
+        let start = self.buffer.position_to_offset(self.cursor.position).ok();
+        let end = self
+            .buffer
+            .position_to_offset(BufferPosition {
+                line,
+                character: start_character + count,
+            })
+            .ok();
+        let (Some(start), Some(end)) = (start, end) else {
+            return;
+        };
+        self.buffer.begin_transaction();
+        let _ = self.buffer.remove(start, end);
+        let replacement: String = std::iter::repeat_n(character, count).collect();
+        let _ = self.buffer.insert(start, &replacement);
+        self.buffer.commit_transaction();
+        self.cursor.position.character = start_character + count.saturating_sub(1);
     }
 
     fn execute_operator(&mut self, mut command: OperatorCommand) {
@@ -406,7 +787,27 @@ impl Editor {
         self.message.clear();
     }
 
+    fn handle_replace_key(&mut self, key: &Key) {
+        match &key.value {
+            KeyValue::Named(name) if name == "escape" => self.leave_insert(),
+            KeyValue::Named(name) if name == "backspace" => self.move_horizontal(-1),
+            KeyValue::Named(name) if name == "enter" => self.insert_text("\n"),
+            KeyValue::Named(name) if name == "left" => self.move_horizontal(-1),
+            KeyValue::Named(name) if name == "right" => self.move_horizontal(1),
+            KeyValue::Named(name) if name == "up" => self.move_vertical(-1),
+            KeyValue::Named(name) if name == "down" => self.move_vertical(1),
+            KeyValue::Character(text)
+                if !key.modifiers.control && !key.modifiers.alt && !key.modifiers.super_key =>
+            {
+                self.replace_text(text)
+            }
+            _ => return,
+        }
+        self.message.clear();
+    }
+
     fn leave_insert(&mut self) {
+        self.finish_block_insert();
         self.buffer.commit_transaction();
         self.vim.leave_insert();
         if self.insert_session_changed && self.cursor.position.character > 0 {
@@ -418,6 +819,11 @@ impl Editor {
     }
 
     fn insert_text(&mut self, text: &str) {
+        if !text.contains('\n')
+            && let Some(block) = &mut self.block_insert
+        {
+            block.inserted_text.push_str(text);
+        }
         let Ok(offset) = self.buffer.position_to_offset(self.cursor.position) else {
             return;
         };
@@ -431,6 +837,64 @@ impl Editor {
         self.insert_session_changed |= !text.is_empty();
         self.cursor.desired_character = None;
         self.ensure_cursor_visible();
+    }
+
+    fn replace_text(&mut self, text: &str) {
+        let Ok(offset) = self.buffer.position_to_offset(self.cursor.position) else {
+            return;
+        };
+        let available = self
+            .current_line_length()
+            .saturating_sub(self.cursor.position.character);
+        let remove_count = text.chars().count().min(available);
+        if remove_count > 0 {
+            let _ = self
+                .buffer
+                .remove(offset, CharOffset(offset.0.saturating_add(remove_count)));
+        }
+        if self.buffer.insert(offset, text).is_err() {
+            return;
+        }
+        let new_offset = CharOffset(offset.0 + text.chars().count());
+        self.cursor.position = self
+            .buffer
+            .offset_to_position(new_offset)
+            .unwrap_or_default();
+        self.insert_session_changed = true;
+        self.ensure_cursor_visible();
+    }
+
+    fn finish_block_insert(&mut self) {
+        let Some(block) = self.block_insert.take() else {
+            return;
+        };
+        if block.inserted_text.is_empty() {
+            return;
+        }
+        for line in block.lines.into_iter().rev() {
+            if line == block.primary_line {
+                continue;
+            }
+            self.ensure_line_column(line, block.column);
+            if let Some(start) = self.buffer.line_start_offset(line) {
+                let _ = self
+                    .buffer
+                    .insert(CharOffset(start.0 + block.column), &block.inserted_text);
+            }
+        }
+    }
+
+    fn ensure_line_column(&mut self, line: usize, column: usize) {
+        let line_length = self.buffer.line_len_chars(line).unwrap_or(0);
+        if line_length >= column {
+            return;
+        }
+        if let Some(start) = self.buffer.line_start_offset(line) {
+            let _ = self.buffer.insert(
+                CharOffset(start.0 + line_length),
+                &" ".repeat(column - line_length),
+            );
+        }
     }
 
     fn backspace(&mut self) {
@@ -523,7 +987,7 @@ impl Editor {
 
     fn maximum_character(&self, line: usize) -> usize {
         let line_length = self.buffer.line_len_chars(line).unwrap_or(0);
-        if self.vim.mode() == Mode::Insert {
+        if matches!(self.vim.mode(), Mode::Insert | Mode::Replace) {
             line_length
         } else {
             line_length.saturating_sub(1)
@@ -560,6 +1024,17 @@ impl Editor {
     }
 }
 
+fn ordered_positions(
+    first: BufferPosition,
+    second: BufferPosition,
+) -> (BufferPosition, BufferPosition) {
+    if (first.line, first.character) <= (second.line, second.character) {
+        (first, second)
+    } else {
+        (second, first)
+    }
+}
+
 fn updated_brace_depth(mut depth: usize, text: &str) -> usize {
     for character in text.chars() {
         match character {
@@ -588,6 +1063,16 @@ mod tests {
         Key {
             value: KeyValue::Named(name.to_owned()),
             modifiers: Modifiers::default(),
+        }
+    }
+
+    fn control_named(name: &str) -> Key {
+        Key {
+            value: KeyValue::Named(name.to_owned()),
+            modifiers: Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
         }
     }
 
@@ -904,6 +1389,82 @@ mod tests {
         editor.handle_key(&named("escape"));
         assert_eq!(editor.mode(), Mode::Normal);
         assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn x_and_x_delete_characters_with_counts() {
+        let mut forward = editor_with_text("abcdef");
+        type_keys(&mut forward, "2x");
+        assert_eq!(forward.buffer.line_text(0).as_deref(), Some("cdef"));
+
+        let mut backward = editor_with_text("abcdef");
+        type_keys(&mut backward, "lll2X");
+        assert_eq!(backward.buffer.line_text(0).as_deref(), Some("adef"));
+    }
+
+    #[test]
+    fn visual_character_and_line_selections_use_existing_operators() {
+        let mut characters = editor_with_text("one two");
+        type_keys(&mut characters, "vlld");
+        assert_eq!(characters.buffer.line_text(0).as_deref(), Some(" two"));
+        assert_eq!(characters.mode(), Mode::Normal);
+
+        let mut lines = editor_with_text("one\ntwo\nthree");
+        type_keys(&mut lines, "Vjd");
+        assert_eq!(lines.buffer.line_text(0).as_deref(), Some("three"));
+    }
+
+    #[test]
+    fn visual_block_delete_applies_disjoint_ranges() {
+        let mut editor = editor_with_text("abc\ndef\nghi");
+        editor.handle_key(&control_named("v"));
+        type_keys(&mut editor, "ljd");
+
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("c"));
+        assert_eq!(editor.buffer.line_text(1).as_deref(), Some("f"));
+        assert_eq!(editor.buffer.line_text(2).as_deref(), Some("ghi"));
+        assert_eq!(
+            editor.registers.unnamed().expect("block register").shape,
+            SelectionShape::BlockWise
+        );
+    }
+
+    #[test]
+    fn visual_block_insert_replicates_text_in_one_transaction() {
+        let mut editor = editor_with_text("abc\ndef\nghi");
+        editor.handle_key(&control_named("v"));
+        type_keys(&mut editor, "jjI>");
+        editor.handle_key(&named("escape"));
+
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some(">abc"));
+        assert_eq!(editor.buffer.line_text(1).as_deref(), Some(">def"));
+        assert_eq!(editor.buffer.line_text(2).as_deref(), Some(">ghi"));
+        assert_eq!(editor.buffer.completed_transaction_count(), 1);
+    }
+
+    #[test]
+    fn single_and_continuous_replace_modes_modify_in_place() {
+        let mut single = editor_with_text("abcd");
+        type_keys(&mut single, "2rX");
+        assert_eq!(single.buffer.line_text(0).as_deref(), Some("XXcd"));
+        assert_eq!(single.cursor.position.character, 1);
+
+        let mut continuous = editor_with_text("abcd");
+        type_keys(&mut continuous, "RXY");
+        continuous.handle_key(&named("escape"));
+        assert_eq!(continuous.buffer.line_text(0).as_deref(), Some("XYcd"));
+        assert_eq!(continuous.mode(), Mode::Normal);
+        assert_eq!(continuous.buffer.completed_transaction_count(), 1);
+    }
+
+    #[test]
+    fn visual_change_enters_insert_and_commits_once() {
+        let mut editor = editor_with_text("one two");
+        type_keys(&mut editor, "vllcnew");
+        editor.handle_key(&named("escape"));
+
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("new two"));
+        assert_eq!(editor.buffer.completed_transaction_count(), 1);
     }
 
     fn editor_with_text(text: &str) -> Editor {

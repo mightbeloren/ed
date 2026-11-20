@@ -2,12 +2,14 @@
 
 A Vim-first, keyboard-only text editor for Linux, built in Rust with GPUI.
 
-The project is being implemented one validated phase at a time. Phase 3 provides generic operator-plus-motion composition, word and character-find motions, registers, and line/case operators.
+The project is implemented one validated, committed phase at a time. **Phase 4 is complete.**
 
 ## Dependency baseline
 
 - GPUI `0.2.2` (exact pin)
 - Ropey `1.6.1` (exact pin)
+
+All UI text uses JetBrains Mono. The font must be installed on the system.
 
 ## Run
 
@@ -15,24 +17,71 @@ The project is being implemented one validated phase at a time. Phase 3 provides
 cargo run -- path/to/file
 ```
 
-Without a path, `ed` opens an unnamed scratch buffer.
+Without a path, `ed` opens an unnamed scratch buffer. `Ctrl-s` atomically saves an opened file; `:w` arrives with Ex commands in Phase 8.
 
-Implemented Normal-mode commands:
+## Implemented Vim behavior
+
+### Modes
+
+- Normal
+- Insert
+- Visual character (`v`)
+- Visual line (`V`)
+- Visual block (`Ctrl-v`)
+- Replace (`R`)
+- Operator-pending
+
+### Motions and editing
 
 - `h`, `j`, `k`, `l`, `w`, `W`, `b`, `B`, `e`, `E`
 - `0`, `^`, `$`, `gg`, `G`, `%`
 - `f`, `F`, `t`, `T`, `;`, `,`
 - Counts such as `12j`, `3w`, `2$`, `5gg`, and `5G`
+- Insert commands `i`, `a`, `I`, `A`, `o`, and `O`
+- Character deletion `x`, `X`
+- Single-character replacement `r`
+- Continuous Replace mode `R`
+
+### Operators and registers
+
 - Operators `d`, `c`, `y`, `>`, `<`, `=`, `g~`, `gu`, and `gU`
-- Doubled line operators such as `dd`, `cc`, `yy`, `>>`, `<<`, and `==`
-- Composed commands such as `dw`, `d2w`, `2dw`, `2d3w`, `c$`, `yG`, and `gUw`
-- Unnamed (`\"`) and black-hole (`\"_`) registers
-- `i`, `a`, `I`, `A`, `o`, and `O`
+- Doubled operators such as `dd`, `cc`, `yy`, `>>`, `<<`, and `==`
+- Generic compositions such as `dw`, `2d3w`, `c$`, `yG`, and `gUw`
+- Operators over Visual character, line, and block selections
+- Visual block insertion with `I` and `A`
+- Unnamed (`"`) and black-hole (`"_`) registers
 
-Insert mode supports printable text, Enter, Backspace, arrow keys, Home, End, and Escape. Each Insert session is grouped as one edit transaction. A change command such as `cw` keeps the same transaction open through the following Insert session. Arrow keys, Home, End, PageUp, and PageDown also remain available in Normal mode.
+Insert, Replace, change, and block-insert sessions are grouped into logical edit transactions in preparation for the undo tree.
 
-`Ctrl-s` atomically saves an opened file. Ex commands such as `:w` are planned for a later phase.
+## UI
 
-The application intentionally has no menus, toolbar, file picker, or mouse-driven controls. All UI text uses JetBrains Mono; the font must be installed on the system. The development profile optimizes GPUI and other dependencies to keep interactive debug builds responsive.
+- JetBrains Mono throughout
+- Neutral Zed-like dark palette
+- Absolute cursor line number with relative surrounding line numbers
+- Keyboard-only cursor and viewport navigation
+- Status bar showing mode, file, modified state, and cursor position
+- Bottom minibuffer row reserved for search, Ex, and shell commands
 
-The cursor line shows its absolute 1-based line number. All other visible lines show their distance from the cursor line.
+There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven editing controls.
+
+## Roadmap
+
+| Phase | Status | Scope |
+|---|---|---|
+| 0 | Complete | GPUI shell, focus, normalized keyboard input |
+| 1 | Complete | Rope buffer, file open/save, viewport, cursor, relative line numbers |
+| 2 | Complete | Normal/Insert modes, core motions, counts, insert transactions |
+| 3 | Complete | Generic operators and motions, registers, operator-pending mode |
+| 4 | **Complete** | Visual char/line/block, selection operators, block edits, Replace mode, `x`/`r` |
+| 5 | Next | Text objects and full register/paste behavior |
+| 6 | Planned | Undo tree, macros, and dot-repeat |
+| 7 | Planned | Search (`/`, `?`, `n`, `N`, `*`, `#`), marks, jump/change lists |
+| 8 | Planned | Minibuffer and Ex commands (`:w`, `:q`, `:e`, `:s`, `:g`, ranges) |
+| 9 | Planned | Dired directory buffers |
+| 10 | Planned | Async shell runner, output buffers, path jump targets |
+| 11 | Planned | Runtime Tree-sitter language plugins and themes |
+| 12 | Planned | Vim compatibility hardening, Unicode/large-file testing, profiling |
+
+Search and `:` commands are therefore expected to be unavailable at Phase 4.
+
+See `AGENTS.md` for architecture constraints and `INSTRUCTIONS.md` for the development and testing workflow.
