@@ -1,0 +1,14 @@
+[package]
+name = "ed"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gpui = "=0.2.2"
+ropey = "=1.6.1"
+
+# GPUI 0.2.2 resolves xattr 0.2.3, which references a libc alias removed
+# from current releases. The vendored patch uses Linux's canonical ENODATA.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
