@@ -8,6 +8,12 @@ publish = false
 gpui = "=0.2.2"
 ropey = "=1.6.1"
 
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 # GPUI 0.2.2 resolves xattr 0.2.3, which references a libc alias removed
 # from current releases. The vendored patch uses Linux's canonical ENODATA.
 [patch.crates-io]

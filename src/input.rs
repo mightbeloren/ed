@@ -35,10 +35,15 @@ impl From<&Keystroke> for Key {
 
         let printable = (!modifiers.control && !modifiers.alt && !modifiers.super_key)
             .then(|| {
-                keystroke
-                    .key_char
-                    .clone()
-                    .or_else(|| (keystroke.key.chars().count() == 1).then(|| keystroke.key.clone()))
+                keystroke.key_char.clone().or_else(|| {
+                    (keystroke.key.chars().count() == 1).then(|| {
+                        if modifiers.shift {
+                            keystroke.key.to_uppercase()
+                        } else {
+                            keystroke.key.clone()
+                        }
+                    })
+                })
             })
             .flatten();
 
@@ -88,6 +93,14 @@ mod tests {
 
         assert_eq!(key.value, KeyValue::Character("a".to_owned()));
         assert_eq!(key.to_string(), "\"a\"");
+    }
+
+    #[test]
+    fn normalizes_shifted_printable_input() {
+        let keystroke = Keystroke::parse("G").expect("valid keystroke");
+        let key = Key::from(&keystroke);
+
+        assert_eq!(key.value, KeyValue::Character("G".to_owned()));
     }
 
     #[test]

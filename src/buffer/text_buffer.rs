@@ -9,7 +9,7 @@ use std::{
 
 use ropey::Rope;
 
-use super::{BufferPosition, CharOffset, InvalidPosition};
+use super::{BufferPosition, CharOffset, EditTransaction, InvalidPosition, TextEdit};
 
 #[derive(Debug)]
 pub enum BufferError {
@@ -46,6 +46,8 @@ pub struct Buffer {
     text: Rope,
     revision: u64,
     saved_revision: u64,
+    active_transaction: Option<EditTransaction>,
+    completed_transactions: Vec<EditTransaction>,
 }
 
 impl Buffer {
@@ -55,6 +57,8 @@ impl Buffer {
             text: Rope::new(),
             revision: 0,
             saved_revision: 0,
+            active_transaction: None,
+            completed_transactions: Vec::new(),
         }
     }
 
@@ -68,6 +72,8 @@ impl Buffer {
             text,
             revision: 0,
             saved_revision: 0,
+            active_transaction: None,
+            completed_transactions: Vec::new(),
         })
     }
 
@@ -141,6 +147,27 @@ impl Buffer {
         })
     }
 
+    pub fn char_at(&self, offset: CharOffset) -> Option<char> {
+        self.text.get_char(offset.0)
+    }
+
+    pub fn begin_transaction(&mut self) {
+        debug_assert!(self.active_transaction.is_none());
+        self.active_transaction = Some(EditTransaction::default());
+    }
+
+    pub fn commit_transaction(&mut self) {
+        if let Some(transaction) = self.active_transaction.take()
+            && !transaction.edits.is_empty()
+        {
+            self.completed_transactions.push(transaction);
+        }
+    }
+
+    pub fn completed_transaction_count(&self) -> usize {
+        self.completed_transactions.len()
+    }
+
     pub fn insert(&mut self, offset: CharOffset, text: &str) -> Result<(), InvalidPosition> {
         if offset.0 > self.text.len_chars() {
             return Err(InvalidPosition {
@@ -150,8 +177,16 @@ impl Buffer {
                 },
             });
         }
+        if text.is_empty() {
+            return Ok(());
+        }
+
         self.text.insert(offset.0, text);
-        self.revision = self.revision.wrapping_add(1);
+        self.record_edit(TextEdit {
+            start: offset,
+            deleted_text: String::new(),
+            inserted_text: text.to_owned(),
+        });
         Ok(())
     }
 
@@ -164,9 +199,25 @@ impl Buffer {
                 },
             });
         }
+        if start == end {
+            return Ok(());
+        }
+
+        let deleted_text = self.text.slice(start.0..end.0).to_string();
         self.text.remove(start.0..end.0);
-        self.revision = self.revision.wrapping_add(1);
+        self.record_edit(TextEdit {
+            start,
+            deleted_text,
+            inserted_text: String::new(),
+        });
         Ok(())
+    }
+
+    fn record_edit(&mut self, edit: TextEdit) {
+        self.revision = self.revision.wrapping_add(1);
+        if let Some(transaction) = &mut self.active_transaction {
+            transaction.edits.push(edit);
+        }
     }
 
     pub fn save(&mut self) -> Result<(), BufferError> {
@@ -262,6 +313,16 @@ mod tests {
             .remove(CharOffset(0), CharOffset(7))
             .expect("valid removal");
         assert!(buffer.is_modified());
+    }
+
+    #[test]
+    fn empty_transactions_are_not_recorded() {
+        let mut buffer = Buffer::scratch();
+
+        buffer.begin_transaction();
+        buffer.commit_transaction();
+
+        assert_eq!(buffer.completed_transaction_count(), 0);
     }
 
     #[test]
