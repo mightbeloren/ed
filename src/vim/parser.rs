@@ -2,7 +2,7 @@ use crate::input::{Key, KeyValue};
 
 use super::{
     Command, Direction, FindMotion, InsertPlacement, Motion, Operator, OperatorCommand,
-    RegisterName, Target, VisualKind,
+    RegisterName, Target, TextObject, TextObjectKind, TextObjectScope, VisualKind,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -30,6 +30,7 @@ pub struct NormalParser {
     operator: Option<PendingOperator>,
     pending_find: Option<PendingFind>,
     pending_replace: bool,
+    pending_text_object: Option<TextObjectScope>,
 }
 
 impl NormalParser {
@@ -63,6 +64,7 @@ impl NormalParser {
         self.operator = None;
         self.pending_find = None;
         self.pending_replace = false;
+        self.pending_text_object = None;
     }
 
     pub fn is_operator_pending(&self) -> bool {
@@ -82,6 +84,19 @@ impl NormalParser {
             self.register = match character {
                 '_' => RegisterName::BlackHole,
                 '"' => RegisterName::Unnamed,
+                '+' => RegisterName::Clipboard,
+                '*' => RegisterName::Primary,
+                '-' => RegisterName::SmallDelete,
+                '0' => RegisterName::Yank,
+                '1'..='9' => RegisterName::Numbered(character.to_digit(10).unwrap_or(1) as u8),
+                'a'..='z' => RegisterName::Named {
+                    name: character,
+                    append: false,
+                },
+                'A'..='Z' => RegisterName::Named {
+                    name: character.to_ascii_lowercase(),
+                    append: true,
+                },
                 _ => {
                     self.reset();
                     return None;
@@ -96,6 +111,37 @@ impl NormalParser {
                 direction: find.direction,
                 till: find.till,
             })));
+        }
+
+        if let Some(scope) = self.pending_text_object.take() {
+            let kind = match character {
+                'w' => TextObjectKind::Word { big_word: false },
+                'W' => TextObjectKind::Word { big_word: true },
+                '"' | '\'' | '`' => TextObjectKind::Quotes(character),
+                '(' | ')' | 'b' => TextObjectKind::Delimited {
+                    open: '(',
+                    close: ')',
+                },
+                '[' | ']' => TextObjectKind::Delimited {
+                    open: '[',
+                    close: ']',
+                },
+                '{' | '}' | 'B' => TextObjectKind::Delimited {
+                    open: '{',
+                    close: '}',
+                },
+                '<' | '>' => TextObjectKind::Delimited {
+                    open: '<',
+                    close: '>',
+                },
+                'p' => TextObjectKind::Paragraph,
+                't' => TextObjectKind::Tag,
+                _ => {
+                    self.reset();
+                    return None;
+                }
+            };
+            return Some(self.complete_text_object(TextObject { scope, kind }));
         }
 
         if self.operator.is_some() {
@@ -177,6 +223,11 @@ impl NormalParser {
             '>' => self.wait_for_operator(Operator::Indent, '>'),
             '<' => self.wait_for_operator(Operator::Outdent, '<'),
             '=' => self.wait_for_operator(Operator::Reindent, '='),
+            '_' => Some(self.motion(Motion::Underscore)),
+            '+' => Some(self.motion(Motion::NextLineFirstNonBlank)),
+            '-' => Some(self.motion(Motion::PreviousLineFirstNonBlank)),
+            'p' => Some(self.paste(true)),
+            'P' => Some(self.paste(false)),
             'x' => Some(self.delete_characters(false)),
             'X' => Some(self.delete_characters(true)),
             'v' => Some(self.enter_visual(VisualKind::Character)),
@@ -222,6 +273,14 @@ impl NormalParser {
         }
 
         let pending = self.operator.expect("operator checked above");
+        if matches!(character, 'i' | 'a') {
+            self.pending_text_object = Some(if character == 'i' {
+                TextObjectScope::Inner
+            } else {
+                TextObjectScope::Around
+            });
+            return None;
+        }
         if character == pending.repeat {
             let count = multiplied_count(pending.count, self.motion_count.take().unwrap_or(1));
             let command = Command::Operate(OperatorCommand {
@@ -358,6 +417,29 @@ impl NormalParser {
         Command::EnterVisual(kind)
     }
 
+    fn paste(&mut self, after: bool) -> Command {
+        let command = Command::Paste {
+            after,
+            count: self.take_count().unwrap_or(1),
+            register: self.register,
+        };
+        self.reset();
+        command
+    }
+
+    fn complete_text_object(&mut self, object: TextObject) -> Command {
+        let pending = self.operator.expect("text object requires an operator");
+        let count = multiplied_count(pending.count, self.motion_count.take().unwrap_or(1));
+        let command = Command::Operate(OperatorCommand {
+            operator: pending.operator,
+            target: Target::TextObject(object),
+            count,
+            register: pending.register,
+        });
+        self.reset();
+        command
+    }
+
     fn take_count(&mut self) -> Option<u32> {
         self.count.take()
     }
@@ -443,6 +525,33 @@ mod tests {
                 count: 1,
                 register: RegisterName::BlackHole,
             }))
+        );
+    }
+
+    #[test]
+    fn parses_text_objects_and_named_register_paste() {
+        assert_eq!(
+            parse_keys("diw"),
+            Some(Command::Operate(OperatorCommand {
+                operator: Operator::Delete,
+                target: Target::TextObject(TextObject {
+                    scope: TextObjectScope::Inner,
+                    kind: TextObjectKind::Word { big_word: false },
+                }),
+                count: 1,
+                register: RegisterName::Unnamed,
+            }))
+        );
+        assert_eq!(
+            parse_keys("\"ap"),
+            Some(Command::Paste {
+                after: true,
+                count: 1,
+                register: RegisterName::Named {
+                    name: 'a',
+                    append: false
+                },
+            })
         );
     }
 

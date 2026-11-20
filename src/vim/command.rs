@@ -25,6 +25,11 @@ pub enum Command {
     BeginBlockInsert {
         append: bool,
     },
+    Paste {
+        after: bool,
+        count: u32,
+        register: RegisterName,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +50,9 @@ pub enum Motion {
     MatchingDelimiter,
     PageUp,
     PageDown,
+    Underscore,
+    NextLineFirstNonBlank,
+    PreviousLineFirstNonBlank,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,7 +96,29 @@ pub struct OperatorCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Target {
     Motion(Motion),
+    TextObject(TextObject),
     CurrentLine,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TextObject {
+    pub scope: TextObjectScope,
+    pub kind: TextObjectKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextObjectScope {
+    Inner,
+    Around,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextObjectKind {
+    Word { big_word: bool },
+    Quotes(char),
+    Delimited { open: char, close: char },
+    Paragraph,
+    Tag,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,4 +139,13 @@ pub enum RegisterName {
     #[default]
     Unnamed,
     BlackHole,
+    Named {
+        name: char,
+        append: bool,
+    },
+    Numbered(u8),
+    Yank,
+    SmallDelete,
+    Clipboard,
+    Primary,
 }

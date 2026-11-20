@@ -142,6 +142,14 @@ impl Editor {
         Some(range)
     }
 
+    pub fn set_system_clipboard(&mut self, text: String) {
+        self.registers.set_clipboard_text(text);
+    }
+
+    pub fn take_system_clipboard_write(&mut self) -> Option<String> {
+        self.registers.take_clipboard_write()
+    }
+
     pub fn set_visible_geometry(&mut self, rows: usize, columns: usize) {
         self.visible_rows = rows.max(1);
         self.visible_columns = columns.max(1);
@@ -191,6 +199,11 @@ impl Editor {
                 self.replace_characters(character, count)
             }
             Command::BeginBlockInsert { append } => self.begin_block_insert(append),
+            Command::Paste {
+                after,
+                count,
+                register,
+            } => self.paste(after, count, register),
         }
     }
 
@@ -343,21 +356,26 @@ impl Editor {
                 } else {
                     ""
                 });
-            self.registers.write(
-                register,
-                RegisterValue {
-                    text,
-                    shape: match kind {
-                        Some(VisualKind::Line) => SelectionShape::LineWise,
-                        Some(VisualKind::Block) => SelectionShape::BlockWise,
-                        _ => SelectionShape::CharacterWise,
-                    },
+            let value = RegisterValue {
+                text,
+                shape: match kind {
+                    Some(VisualKind::Line) => SelectionShape::LineWise,
+                    Some(VisualKind::Block) => SelectionShape::BlockWise,
+                    _ => SelectionShape::CharacterWise,
                 },
-            );
+            };
+            if operator == Operator::Yank {
+                self.registers.record_yank(register, value);
+            } else {
+                self.registers.record_delete(register, value);
+            }
         }
 
         match operator {
-            Operator::Yank => self.exit_visual(),
+            Operator::Yank => {
+                self.cursor.position = targets[0].cursor;
+                self.exit_visual();
+            }
             Operator::Delete => {
                 self.exit_visual();
                 self.delete_multiple_targets(&targets);
@@ -489,7 +507,7 @@ impl Editor {
                 character: start_character,
             },
         };
-        self.registers.write(
+        self.registers.record_delete(
             RegisterName::Unnamed,
             RegisterValue {
                 text: self.buffer.text(start, end).unwrap_or_default(),
@@ -497,6 +515,82 @@ impl Editor {
             },
         );
         self.delete_target(target);
+    }
+
+    fn paste(&mut self, after: bool, count: u32, register: RegisterName) {
+        let Some(value) = self.registers.read(register).cloned() else {
+            return;
+        };
+        let repeated = value.text.repeat(count.max(1) as usize);
+        self.buffer.begin_transaction();
+        match value.shape {
+            SelectionShape::CharacterWise => {
+                let line_length = self.current_line_length();
+                let character = if after {
+                    self.cursor
+                        .position
+                        .character
+                        .saturating_add(1)
+                        .min(line_length)
+                } else {
+                    self.cursor.position.character
+                };
+                if let Ok(offset) = self.buffer.position_to_offset(BufferPosition {
+                    line: self.cursor.position.line,
+                    character,
+                }) {
+                    let _ = self.buffer.insert(offset, &repeated);
+                    self.cursor.position = self
+                        .buffer
+                        .offset_to_position(CharOffset(
+                            offset.0 + repeated.chars().count().saturating_sub(1),
+                        ))
+                        .unwrap_or(self.cursor.position);
+                }
+            }
+            SelectionShape::LineWise => {
+                let line = if after {
+                    self.cursor.position.line.saturating_add(1)
+                } else {
+                    self.cursor.position.line
+                };
+                let offset = self
+                    .buffer
+                    .line_start_offset(line)
+                    .unwrap_or(CharOffset(self.buffer.len_chars()));
+                let mut text = repeated;
+                if after
+                    && line >= self.buffer.len_lines()
+                    && self.buffer.len_chars() > 0
+                    && self.buffer.char_at(CharOffset(self.buffer.len_chars() - 1)) != Some('\n')
+                {
+                    text.insert(0, '\n');
+                }
+                if !text.ends_with('\n') && line < self.buffer.len_lines() {
+                    text.push('\n');
+                }
+                let _ = self.buffer.insert(offset, &text);
+                self.cursor.position = self.buffer.offset_to_position(offset).unwrap_or_default();
+            }
+            SelectionShape::BlockWise => {
+                let column = self.cursor.position.character + usize::from(after);
+                let rows: Vec<_> = value.text.lines().collect();
+                for _ in 0..count.max(1) {
+                    for (row, text) in rows.iter().enumerate().rev() {
+                        let line = self.cursor.position.line + row;
+                        if line >= self.buffer.len_lines() {
+                            continue;
+                        }
+                        self.ensure_line_column(line, column);
+                        if let Some(start) = self.buffer.line_start_offset(line) {
+                            let _ = self.buffer.insert(CharOffset(start.0 + column), text);
+                        }
+                    }
+                }
+            }
+        }
+        self.buffer.commit_transaction();
+        self.clamp_cursor_to_mode();
     }
 
     fn enter_replace(&mut self) {
@@ -569,7 +663,10 @@ impl Editor {
                         .unwrap_or_default(),
                     shape: target.shape,
                 };
-                self.registers.write(command.register, value);
+                match command.operator {
+                    Operator::Yank => self.registers.record_yank(command.register, value),
+                    _ => self.registers.record_delete(command.register, value),
+                }
                 match command.operator {
                     Operator::Delete => self.delete_target(target),
                     Operator::Change => self.change_target(target),
@@ -1465,6 +1562,107 @@ mod tests {
 
         assert_eq!(editor.buffer.line_text(0).as_deref(), Some("new two"));
         assert_eq!(editor.buffer.completed_transaction_count(), 1);
+    }
+
+    #[test]
+    fn word_quote_delimiter_and_tag_text_objects_resolve_generically() {
+        let mut word = editor_with_text("one two");
+        type_keys(&mut word, "diw");
+        assert_eq!(word.buffer.line_text(0).as_deref(), Some(" two"));
+
+        let mut around = editor_with_text("one two");
+        type_keys(&mut around, "daw");
+        assert_eq!(around.buffer.line_text(0).as_deref(), Some("two"));
+
+        let mut quote = editor_with_text("say \"hello\" now");
+        type_keys(&mut quote, "llllldi\"");
+        assert_eq!(quote.buffer.line_text(0).as_deref(), Some("say \"\" now"));
+
+        let mut delimiter = editor_with_text("a (nested) value");
+        type_keys(&mut delimiter, "llllda(");
+        assert_eq!(delimiter.buffer.line_text(0).as_deref(), Some("a  value"));
+
+        let mut tag = editor_with_text("<b>bold</b>");
+        type_keys(&mut tag, "lllldit");
+        assert_eq!(tag.buffer.line_text(0).as_deref(), Some("<b></b>"));
+    }
+
+    #[test]
+    fn character_and_linewise_paste_preserve_register_shape() {
+        let mut character = editor_with_text("one two");
+        type_keys(&mut character, "yiw$p");
+        assert_eq!(character.buffer.line_text(0).as_deref(), Some("one twoone"));
+
+        let mut line = editor_with_text("one\ntwo");
+        type_keys(&mut line, "yyp");
+        assert_eq!(line.buffer.line_text(0).as_deref(), Some("one"));
+        assert_eq!(line.buffer.line_text(1).as_deref(), Some("one"));
+        assert_eq!(line.buffer.line_text(2).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn blockwise_paste_applies_each_register_row() {
+        let mut editor = editor_with_text("ab\ncd");
+        editor.handle_key(&control_named("v"));
+        type_keys(&mut editor, "jyP");
+
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("aab"));
+        assert_eq!(editor.buffer.line_text(1).as_deref(), Some("ccd"));
+    }
+
+    #[test]
+    fn named_append_and_clipboard_registers_work() {
+        let mut editor = editor_with_text("one two");
+        type_keys(&mut editor, "\"ayiw");
+        type_keys(&mut editor, "w\"Ayiw");
+        assert_eq!(
+            editor
+                .registers
+                .read(RegisterName::Named {
+                    name: 'a',
+                    append: false
+                })
+                .expect("named register")
+                .text,
+            "onetwo"
+        );
+
+        editor.set_system_clipboard("clip".to_owned());
+        type_keys(&mut editor, "$\"+p");
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one twoclip"));
+
+        let mut write = editor_with_text("copy");
+        type_keys(&mut write, "\"+yiw");
+        assert_eq!(write.take_system_clipboard_write().as_deref(), Some("copy"));
+    }
+
+    #[test]
+    fn remaining_line_motions_land_on_first_non_blank() {
+        let mut editor = editor_with_text("  one\n    two\n three");
+        type_keys(&mut editor, "+");
+        assert_eq!(
+            editor.cursor.position,
+            BufferPosition {
+                line: 1,
+                character: 4
+            }
+        );
+        type_keys(&mut editor, "-");
+        assert_eq!(
+            editor.cursor.position,
+            BufferPosition {
+                line: 0,
+                character: 2
+            }
+        );
+        type_keys(&mut editor, "2_");
+        assert_eq!(
+            editor.cursor.position,
+            BufferPosition {
+                line: 1,
+                character: 4
+            }
+        );
     }
 
     fn editor_with_text(text: &str) -> Editor {

@@ -2,7 +2,7 @@
 
 A Vim-first, keyboard-only text editor for Linux, built in Rust with GPUI.
 
-The project is implemented one validated, committed phase at a time. **Phase 4 is complete.**
+The project is implemented one validated, committed phase at a time. **Phase 5 is complete.**
 
 ## Dependency baseline
 
@@ -34,7 +34,7 @@ Without a path, `ed` opens an unnamed scratch buffer. `Ctrl-s` atomically saves 
 ### Motions and editing
 
 - `h`, `j`, `k`, `l`, `w`, `W`, `b`, `B`, `e`, `E`
-- `0`, `^`, `$`, `gg`, `G`, `%`
+- `0`, `^`, `$`, `_`, `+`, `-`, `gg`, `G`, `%`
 - `f`, `F`, `t`, `T`, `;`, `,`
 - Counts such as `12j`, `3w`, `2$`, `5gg`, and `5G`
 - Insert commands `i`, `a`, `I`, `A`, `o`, and `O`
@@ -49,7 +49,10 @@ Without a path, `ed` opens an unnamed scratch buffer. `Ctrl-s` atomically saves 
 - Generic compositions such as `dw`, `2d3w`, `c$`, `yG`, and `gUw`
 - Operators over Visual character, line, and block selections
 - Visual block insertion with `I` and `A`
-- Unnamed (`"`) and black-hole (`"_`) registers
+- Text objects: `iw`, `aw`, `iW`, `aW`, quotes, delimiters, paragraphs, and tags
+- Characterwise, linewise, and blockwise `p` / `P`
+- Unnamed, named/append, numbered, yank (`0`), small-delete (`-`), black-hole (`_`), clipboard (`+`), and primary (`*`) registers
+- GPUI system clipboard synchronization for `+` and `*`
 
 Insert, Replace, change, and block-insert sessions are grouped into logical edit transactions in preparation for the undo tree.
 
@@ -73,8 +76,8 @@ There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven 
 | 2 | Complete | Normal/Insert modes, core motions, counts, insert transactions |
 | 3 | Complete | Generic operators and motions, registers, operator-pending mode |
 | 4 | **Complete** | Visual char/line/block, selection operators, block edits, Replace mode, `x`/`r` |
-| 5 | Next | Text objects and full register/paste behavior |
-| 6 | Planned | Undo tree, macros, and dot-repeat |
+| 5 | **Complete** | Text objects, full register families, clipboard bridge, character/line/block paste |
+| 6 | Next | Undo tree, macros, and dot-repeat |
 | 7 | Planned | Search (`/`, `?`, `n`, `N`, `*`, `#`), marks, jump/change lists |
 | 8 | Planned | Minibuffer and Ex commands (`:w`, `:q`, `:e`, `:s`, `:g`, ranges) |
 | 9 | Planned | Dired directory buffers |
@@ -82,6 +85,6 @@ There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven 
 | 11 | Planned | Runtime Tree-sitter language plugins and themes |
 | 12 | Planned | Vim compatibility hardening, Unicode/large-file testing, profiling |
 
-Search and `:` commands are therefore expected to be unavailable at Phase 4.
+Search and `:` commands are therefore expected to be unavailable at Phase 5.
 
 See `AGENTS.md` for architecture constraints and `INSTRUCTIONS.md` for the development and testing workflow.

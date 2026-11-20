@@ -1,6 +1,6 @@
 use crate::buffer::{Buffer, BufferPosition, CharOffset};
 
-use super::{Direction, FindMotion, Motion, Target};
+use super::{Direction, FindMotion, Motion, Target, TextObject, TextObjectKind, TextObjectScope};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionShape {
@@ -206,6 +206,28 @@ pub fn resolve_motion(
             MotionKind::Inclusive,
             None,
         ),
+        Motion::Underscore | Motion::NextLineFirstNonBlank | Motion::PreviousLineFirstNonBlank => {
+            let distance = match motion {
+                Motion::Underscore => count.saturating_sub(1),
+                _ => count,
+            };
+            let line = match motion {
+                Motion::PreviousLineFirstNonBlank => start.line.saturating_sub(distance),
+                _ => start.line.saturating_add(distance).min(last_line),
+            };
+            let character = buffer
+                .line_text(line)
+                .unwrap_or_default()
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .count()
+                .min(buffer.line_len_chars(line).unwrap_or(0).saturating_sub(1));
+            (
+                BufferPosition { line, character },
+                MotionKind::LineWise,
+                None,
+            )
+        }
     };
 
     Some(MotionOutcome {
@@ -226,6 +248,7 @@ pub fn resolve_target(
 ) -> Option<ResolvedTarget> {
     match target {
         Target::CurrentLine => linewise_target(buffer, cursor.line, cursor.line, count),
+        Target::TextObject(object) => resolve_text_object(buffer, cursor, object, count),
         Target::Motion(motion) => {
             let outcome = resolve_motion(
                 buffer,
@@ -268,6 +291,136 @@ pub fn resolve_target(
             })
         }
     }
+}
+
+fn resolve_text_object(
+    buffer: &Buffer,
+    cursor: BufferPosition,
+    object: TextObject,
+    _count: u32,
+) -> Option<ResolvedTarget> {
+    let cursor_offset = buffer.position_to_offset(cursor).ok()?;
+    let (start, end, shape) = match object.kind {
+        TextObjectKind::Word { big_word } => {
+            let class = word_class(buffer.char_at(cursor_offset)?, big_word);
+            let mut start = cursor_offset.0;
+            let mut end = cursor_offset.0 + 1;
+            while start > 0 && word_class(buffer.char_at(CharOffset(start - 1))?, big_word) == class
+            {
+                start -= 1;
+            }
+            while end < buffer.len_chars()
+                && word_class(buffer.char_at(CharOffset(end))?, big_word) == class
+            {
+                end += 1;
+            }
+            if object.scope == TextObjectScope::Around {
+                while end < buffer.len_chars() && buffer.char_at(CharOffset(end))?.is_whitespace() {
+                    end += 1;
+                }
+                if end == cursor_offset.0 + 1 {
+                    while start > 0 && buffer.char_at(CharOffset(start - 1))?.is_whitespace() {
+                        start -= 1;
+                    }
+                }
+            }
+            (
+                CharOffset(start),
+                CharOffset(end),
+                SelectionShape::CharacterWise,
+            )
+        }
+        TextObjectKind::Quotes(quote) => {
+            let line = buffer.line_text(cursor.line)?;
+            let chars: Vec<_> = line.chars().collect();
+            let left = (0..=cursor.character.min(chars.len().saturating_sub(1)))
+                .rev()
+                .find(|&index| chars[index] == quote)?;
+            let right = (cursor.character.saturating_add(1)..chars.len())
+                .find(|&index| chars[index] == quote)?;
+            let line_start = buffer.line_start_offset(cursor.line)?;
+            let padding = usize::from(object.scope == TextObjectScope::Inner);
+            (
+                CharOffset(line_start.0 + left + padding),
+                CharOffset(line_start.0 + right + 1 - padding),
+                SelectionShape::CharacterWise,
+            )
+        }
+        TextObjectKind::Delimited { open, close } => {
+            let mut left = cursor_offset.0;
+            while buffer.char_at(CharOffset(left))? != open {
+                if left == 0 {
+                    return None;
+                }
+                left -= 1;
+            }
+            let mut right = cursor_offset.0;
+            while right < buffer.len_chars() && buffer.char_at(CharOffset(right))? != close {
+                right += 1;
+            }
+            if right >= buffer.len_chars() {
+                return None;
+            }
+            let padding = usize::from(object.scope == TextObjectScope::Inner);
+            (
+                CharOffset(left + padding),
+                CharOffset(right + 1 - padding),
+                SelectionShape::CharacterWise,
+            )
+        }
+        TextObjectKind::Paragraph => {
+            let mut first = cursor.line;
+            let mut last = cursor.line;
+            while first > 0 && !buffer.line_text(first - 1)?.trim().is_empty() {
+                first -= 1;
+            }
+            while last + 1 < buffer.len_lines() && !buffer.line_text(last + 1)?.trim().is_empty() {
+                last += 1;
+            }
+            if object.scope == TextObjectScope::Around && last + 1 < buffer.len_lines() {
+                last += 1;
+            }
+            return linewise_target(buffer, first, last, 1);
+        }
+        TextObjectKind::Tag => {
+            let text = buffer.text(CharOffset(0), CharOffset(buffer.len_chars()))?;
+            let before = &text[..text
+                .char_indices()
+                .nth(cursor_offset.0)
+                .map_or(text.len(), |(i, _)| i)];
+            let open_byte = before.rfind('<')?;
+            let open_end = text[open_byte..].find('>')? + open_byte;
+            let name: String = text[open_byte + 1..open_end]
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != '>')
+                .collect();
+            if name.is_empty() || name.starts_with('/') {
+                return None;
+            }
+            let close_pattern = format!("</{name}>");
+            let close_byte = text[open_end + 1..].find(&close_pattern)? + open_end + 1;
+            let byte_to_char = |byte: usize| text[..byte].chars().count();
+            let (start, end) = if object.scope == TextObjectScope::Inner {
+                (byte_to_char(open_end + 1), byte_to_char(close_byte))
+            } else {
+                (
+                    byte_to_char(open_byte),
+                    byte_to_char(close_byte + close_pattern.len()),
+                )
+            };
+            (
+                CharOffset(start),
+                CharOffset(end),
+                SelectionShape::CharacterWise,
+            )
+        }
+    };
+    Some(ResolvedTarget {
+        start,
+        end,
+        shape,
+        cursor: buffer.offset_to_position(start).ok()?,
+    })
 }
 
 fn linewise_target(

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, Application, Bounds, Context, FocusHandle, Focusable, Window, WindowBounds, WindowOptions,
-    prelude::*, px, size,
+    App, Application, Bounds, ClipboardItem, Context, FocusHandle, Focusable, Window, WindowBounds,
+    WindowOptions, prelude::*, px, size,
 };
 
 use crate::{editor::Editor, input::Key, ui};
@@ -25,7 +25,13 @@ impl EditorApp {
     }
 
     fn handle_key(&mut self, key: Key, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.editor.set_system_clipboard(text);
+        }
         self.editor.handle_key(&key);
+        if let Some(text) = self.editor.take_system_clipboard_write() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
         cx.notify();
     }
 }

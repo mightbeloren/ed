@@ -32,7 +32,7 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 
 ## Current phase
 
-Phase 4 is complete:
+Phase 5 is complete:
 
 - Rope-backed file buffer, atomic save, viewport, cursor, and relative line numbers
 - Normal and Insert modes
@@ -42,6 +42,10 @@ Phase 4 is complete:
 - Selection rendering and operators
 - Block insertion/deletion
 - Replace mode, `r`, `x`, and `X`
+- Word, quote, delimiter, paragraph, and tag text objects
+- Named, numbered, yank, small-delete, black-hole, clipboard, and primary registers
+- Characterwise, linewise, and blockwise paste
+- GPUI clipboard synchronization
 
 See `README.md` for the complete roadmap. Search is Phase 7. Ex commands and `:` minibuffer execution are Phase 8.
 
