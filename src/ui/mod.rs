@@ -1,6 +1,6 @@
 use gpui::{Div, Window, div, prelude::*, px, rgb};
 
-use crate::{editor::Editor, vim::Mode};
+use crate::{editor::Editor, syntax::HighlightSpan, vim::Mode};
 
 pub const LINE_HEIGHT: gpui::Pixels = px(21.0);
 pub const CHROME_HEIGHT: gpui::Pixels = px(56.0);
@@ -43,6 +43,9 @@ pub fn render(editor: &Editor, focused: bool, visible_rows: usize) -> Div {
     } else {
         ""
     };
+    let language = editor
+        .syntax_language_name()
+        .map_or_else(String::new, |name| format!(" [{name}]"));
     let focus_status = if focused { "FOCUSED" } else { "UNFOCUSED" };
     let mode = if editor.is_dired() {
         "DIRED"
@@ -100,7 +103,7 @@ pub fn render(editor: &Editor, focused: bool, visible_rows: usize) -> Div {
                 .px_2()
                 .bg(rgb(STATUS_BACKGROUND))
                 .child(mode)
-                .child(format!("{}{}", editor.display_name(), modified))
+                .child(format!("{}{}{}", editor.display_name(), modified, language))
                 .child(format!(
                     "{}  {}:{}",
                     focus_status,
@@ -131,12 +134,14 @@ fn render_line(
     let text = editor.buffer().line_text(line_index).unwrap_or_default();
     let left = editor.viewport().left_character.min(text.chars().count());
 
+    let syntax_spans = editor.syntax_spans(line_index).collect::<Vec<_>>();
     let content = render_text_line(
         &text,
         left,
         (line_index == cursor_line).then_some(cursor_character),
         mode,
         editor.selection_columns(line_index),
+        &syntax_spans,
     );
 
     div()
@@ -176,42 +181,51 @@ fn render_text_line(
     cursor_character: Option<usize>,
     mode: Mode,
     selection: Option<(usize, usize)>,
+    syntax_spans: &[HighlightSpan],
 ) -> Div {
     let characters: Vec<char> = text.chars().collect();
     let cursor = cursor_character.map(|cursor| cursor.min(characters.len()));
-    if mode == Mode::Insert
-        && let Some(cursor) = cursor
-    {
-        let visible_start = left.min(cursor);
-        let before: String = characters[visible_start..cursor].iter().collect();
-        let after: String = characters[cursor..].iter().collect();
-        return div()
-            .flex()
-            .whitespace_nowrap()
-            .child(before)
-            .child(
+    let insert_mode = mode == Mode::Insert;
+    let mut line = div().flex().whitespace_nowrap();
+    for (index, character) in characters.iter().enumerate().skip(left) {
+        if insert_mode && cursor == Some(index) {
+            line = line.child(
                 div()
                     .w(px(2.0))
                     .h(LINE_HEIGHT)
                     .flex_shrink_0()
                     .bg(rgb(ACCENT)),
-            )
-            .child(after);
-    }
-
-    let mut line = div().flex().whitespace_nowrap();
-    for (index, character) in characters.iter().enumerate().skip(left) {
+            );
+        }
         let selected = selection.is_some_and(|(start, end)| index >= start && index <= end);
-        let is_cursor = cursor == Some(index);
+        let is_cursor = !insert_mode && cursor == Some(index);
         let mut cell = div().child(character.to_string());
         if is_cursor {
             cell = cell.bg(rgb(ACCENT)).text_color(rgb(CURSOR_TEXT));
-        } else if selected {
-            cell = cell.bg(rgb(SELECTION_BACKGROUND));
+        } else {
+            if selected {
+                cell = cell.bg(rgb(SELECTION_BACKGROUND));
+            }
+            if let Some(color) = syntax_spans
+                .iter()
+                .rev()
+                .find(|span| index >= span.start_character && index < span.end_character)
+                .map(|span| span.color)
+            {
+                cell = cell.text_color(rgb(color));
+            }
         }
         line = line.child(cell);
     }
-    if cursor == Some(characters.len()) || (characters.is_empty() && selection.is_some()) {
+    if insert_mode && cursor == Some(characters.len()) {
+        line = line.child(
+            div()
+                .w(px(2.0))
+                .h(LINE_HEIGHT)
+                .flex_shrink_0()
+                .bg(rgb(ACCENT)),
+        );
+    } else if cursor == Some(characters.len()) || (characters.is_empty() && selection.is_some()) {
         let mut cell = div().child(" ");
         if cursor == Some(characters.len()) {
             cell = cell.bg(rgb(ACCENT)).text_color(rgb(CURSOR_TEXT));

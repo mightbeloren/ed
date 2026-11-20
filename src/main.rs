@@ -7,8 +7,10 @@ mod input;
 mod minibuffer;
 mod navigation;
 mod output;
+mod plugin;
 mod search;
 mod shell;
+mod syntax;
 mod ui;
 pub mod vim;
 

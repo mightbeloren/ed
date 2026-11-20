@@ -26,6 +26,8 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 - Operator-plus-motion behavior must remain generic. Do not add separate implementations for combinations such as `dw`, `db`, or `d$`.
 - Motions resolve through `vim::target`; operators consume `ResolvedTarget` values.
 - Keep buffer, Vim, Ex parsing, syntax, Dired, minibuffer/shell, UI, and plugin loading as separate modules.
+- Runtime language discovery and native-library loading belong in `plugin`; parsing, capture-to-color resolution, and byte-to-character span conversion belong in `syntax`. Neither module depends on GPUI.
+- Retain each grammar library until all `tree_sitter::Query` and `tree_sitter::Language` values derived from it have dropped. Keep the trusted-native-code unsafe boundary small and documented.
 - Ex input is parsed into typed `ex::ExCommand` values before execution; parse and validate before mutating the buffer.
 - Treat byte offsets, Rope character offsets, buffer line/character positions, and display columns as distinct concepts.
 - The current editor intentionally has no soft wrapping.
@@ -33,7 +35,7 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 
 ## Current phase
 
-Phase 10 is complete:
+Phase 11 is complete:
 
 - Rope-backed file buffer, atomic save, viewport, cursor, and relative line numbers
 - Normal and Insert modes
@@ -68,8 +70,14 @@ Phase 10 is complete:
 - Existing `path`, `path:line`, and `path:line:column` output jump targets
 - Output and opened-target quit behavior returns to the command working-directory Dired
 - Modified-buffer protection before shell launch and when asynchronous completion arrives
+- Startup discovery of runtime Tree-sitter language folders and extension-based selection
+- Dynamically loaded grammar `.so` files with isolated error reporting and ABI validation
+- Runtime `highlights.scm` compilation and capture-based `theme.toml` colors
+- Dotted capture fallback and a built-in neutral dark theme
+- Unicode-safe conversion from Tree-sitter byte spans to UI character spans
+- Syntax colors in Normal/Insert/Visual rendering and the active language in the status bar
 
-Phase 11 is next: runtime Tree-sitter language plugins and capture-based themes. See `README.md` for the complete roadmap.
+Phase 12 is next: Vim compatibility hardening, incremental syntax parsing, Unicode/large-file testing, and profiling. See `README.md` for the complete roadmap.
 
 ## Phase discipline
 

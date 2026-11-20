@@ -96,6 +96,10 @@ impl Buffer {
             .unwrap_or_else(|| "[No Name]".to_owned())
     }
 
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn is_modified(&self) -> bool {
         self.untracked_modified
             || self.current_undo != self.saved_undo

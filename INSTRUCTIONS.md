@@ -63,6 +63,23 @@ Keep shell process execution out of the UI thread and keep GPUI imports out of `
 
 Dired listing text remains read-only. If writable Dired is added later, implement it as an explicit `wdired`-style filesystem-operation mode with validated rename operations, not by treating arbitrary listing edits as a normal buffer save.
 
+Runtime syntax highlighting follows this core-only path:
+
+```text
+${XDG_CONFIG_HOME:-$HOME/.config}/ed/languages/*/language.toml
+→ plugin manifest validation
+→ trusted grammar `.so` load and Tree-sitter ABI validation
+→ highlights.scm query compilation
+→ file-extension language selection
+→ source parse and capture query
+→ byte-range to per-line Unicode character-range conversion
+→ GPUI applies precomputed colors while rendering
+```
+
+Keep `plugin` and `syntax` independent from GPUI, and never load files or parse source during `Render`. Dynamic grammar loading is the project's narrow unsafe boundary: grammar libraries are trusted native code, symbol pointers must be checked, and the `Library` must outlive every `Language` and `Query` derived from it. Preserve the `LanguagePlugin` field/drop order so the query and language drop before the library unloads. Tree-sitter reports UTF-8 byte offsets; never pass them directly to Rope character offsets or UI columns. Invalid plugins and themes must produce actionable errors while allowing startup with the built-in theme and remaining valid plugins.
+
+Phase 11 intentionally reparses the complete buffer after each revision. Incremental `Tree::edit`, background parsing, cancellation, and large-file performance work belong to Phase 12. Tests must construct an in-memory/static registry and must not read the developer's real `~/.config/ed` directory.
+
 ## Test strategy
 
 Every new Vim feature needs tests at two levels when practical.
@@ -104,6 +121,10 @@ Add tests under `src/buffer/` for:
 - Save behavior and modified state
 
 Use unique temporary directories and clean them up in the test.
+
+### Syntax/plugin tests
+
+Cover manifest validation, broken-plugin isolation, theme parsing and fallback, capture-parent fallback, language selection, query execution, and multibyte UTF-8 byte-to-character conversion. Static grammar crates are acceptable as dev-dependencies; production language support must remain runtime-loaded.
 
 ### UI tests
 

@@ -2,7 +2,7 @@
 
 A Vim-first, keyboard-only text editor for Linux, built in Rust with GPUI.
 
-The project is implemented one validated, committed phase at a time. **Phase 10 is complete.**
+The project is implemented one validated, committed phase at a time. **Phase 11 is complete.**
 
 ## Dependency baseline
 
@@ -10,6 +10,9 @@ The project is implemented one validated, committed phase at a time. **Phase 10 
 - Ropey `1.6.1` (exact pin)
 - Regex `1.13.2` (exact pin)
 - Async-channel `2.5.0` (exact pin)
+- Tree-sitter `0.25.10` (exact pin)
+- Libloading `0.8.9` (exact pin)
+- Serde `1.0.229` and TOML `0.8.23` (exact pins)
 
 All UI text uses JetBrains Mono. The font must be installed on the system.
 
@@ -124,6 +127,46 @@ Dired intentionally remains read-only. Emacs-style writable Dired (`wdired`) wou
 
 `:run` uses Linux util-linux `/usr/bin/script` to allocate a PTY, so programs detect a terminal and flush terminal-oriented output in real time. ANSI control sequences are removed and carriage-return redraws become readable transcript lines. This is a PTY-backed command transcript, not a fully interactive terminal emulator: keyboard input is not forwarded to the child and terminal colors/cursor positioning are not rendered. File completion and target parsing currently focus on whitespace-delimited shell/compiler formats; quoting, escaped spaces, and paths containing spaces are not comprehensively supported.
 
+## Runtime syntax plugins
+
+At startup, `ed` scans `${XDG_CONFIG_HOME:-$HOME/.config}/ed/languages/`. Each immediate child directory is one language plugin:
+
+```text
+~/.config/ed/
+├── theme.toml
+└── languages/<name>/
+    ├── language.toml
+    ├── grammar.so
+    └── highlights.scm
+```
+
+A plugin manifest uses this schema:
+
+```toml
+name = "rust"
+extensions = ["rs"]
+grammar = "grammar.so"
+highlights = "highlights.scm"
+symbol = "tree_sitter_rust" # optional
+```
+
+`extensions` omit the leading dot and select a plugin from the opened file's extension. Plugin paths must be relative to the language folder. If `symbol` is omitted, it defaults to `tree_sitter_<name>`, with `-` and `.` converted to `_`. The shared library must export that generated Tree-sitter C function, and its grammar must be compatible with the supplied `highlights.scm` query.
+
+The optional `~/.config/ed/theme.toml` maps Tree-sitter capture names to `#RRGGBB` colors:
+
+```toml
+[captures]
+keyword = "#c586c0"
+string = "#ce9178"
+"function.call" = "#dcdcaa"
+```
+
+Capture lookup falls back through dotted parents, so `function.call` uses `function` when no exact mapping exists. A built-in neutral dark theme is used when no theme exists or the theme is invalid. Broken language plugins are reported without preventing the editor from starting. See `examples/language-plugin/` and `examples/theme.toml` for templates.
+
+Language plugins and the theme are loaded only when `ed` starts, so changes require a restart. Parsing currently reparses the full buffer after each edit; incremental parsing and large-file profiling are Phase 12 work.
+
+**Security and compatibility:** a grammar `.so` is trusted native code, not sandboxed data. Loading one can execute arbitrary code or crash the process. `ed` validates the Tree-sitter language ABI version, but plugin authors are still responsible for compiling a compatible grammar and matching query. Install plugins only from sources you trust.
+
 ## UI
 
 - JetBrains Mono throughout
@@ -150,9 +193,9 @@ There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven 
 | 8 | **Complete** | Reusable minibuffer and Ex commands (`:w`, `:q`, `:e`, `:s`, `:g`, ranges) |
 | 9 | **Complete** | Dired directory buffers, startup browsing, file-return quit behavior |
 | 10 | **Complete** | Async shell runner, read-only output buffers, path jump targets |
-| 11 | Next | Runtime Tree-sitter language plugins and themes |
-| 12 | Planned | Vim compatibility hardening, Unicode/large-file testing, profiling |
+| 11 | **Complete** | Runtime Tree-sitter language plugins and capture-based themes |
+| 12 | Next | Vim compatibility hardening, Unicode/large-file testing, profiling |
 
-Runtime Tree-sitter language plugins and capture-based themes are the next implementation checkpoint in Phase 11.
+Vim compatibility hardening, incremental syntax parsing, Unicode/large-file testing, and profiling are the next implementation checkpoint in Phase 12.
 
 See `AGENTS.md` for architecture constraints and `INSTRUCTIONS.md` for the development and testing workflow.

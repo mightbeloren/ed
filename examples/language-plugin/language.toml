@@ -1,0 +1,5 @@
+name = "rust"
+extensions = ["rs"]
+grammar = "grammar.so"
+highlights = "highlights.scm"
+symbol = "tree_sitter_rust"

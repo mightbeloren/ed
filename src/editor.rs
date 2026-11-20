@@ -15,6 +15,7 @@ use crate::{
     output::{JumpTarget, OutputState},
     search::{self, Search},
     shell::{ShellCompletion, ShellRequest},
+    syntax::{HighlightSpan, SyntaxManager},
     vim::{
         Command, Direction, FindMotion, InsertPlacement, Mode, Motion, Operator, OperatorCommand,
         RegisterName, RegisterStore, RegisterValue, ResolvedTarget, SelectionShape, Target,
@@ -90,6 +91,7 @@ pub struct Editor {
     last_ex_pattern: Option<String>,
     request: Option<EditorRequest>,
     next_shell_request_id: u64,
+    syntax: SyntaxManager,
     replaying: bool,
 }
 
@@ -138,7 +140,12 @@ impl Editor {
     }
 
     fn with_buffer(buffer: Buffer, dired: Option<DiredState>, message: String) -> Self {
-        Self {
+        #[cfg(test)]
+        let syntax = SyntaxManager::empty();
+        #[cfg(not(test))]
+        let syntax = SyntaxManager::load_default();
+        let syntax_error = syntax.errors().first().cloned();
+        let mut editor = Self {
             buffer,
             dired,
             dired_return: None,
@@ -168,12 +175,28 @@ impl Editor {
             last_ex_pattern: None,
             request: None,
             next_shell_request_id: 1,
+            syntax,
             replaying: false,
+        };
+        editor.refresh_syntax();
+        if editor.message.is_empty()
+            && let Some(error) = syntax_error
+        {
+            editor.message = format!("Syntax: {error}");
         }
+        editor
     }
 
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
+    }
+
+    pub fn syntax_spans(&self, line: usize) -> impl Iterator<Item = HighlightSpan> + '_ {
+        self.syntax.spans_for_line(line)
+    }
+
+    pub fn syntax_language_name(&self) -> Option<&str> {
+        self.syntax.active_language_name()
     }
 
     pub fn display_name(&self) -> String {
@@ -323,6 +346,14 @@ impl Editor {
     }
 
     pub fn handle_key(&mut self, key: &Key) {
+        let revision = self.buffer.revision();
+        self.handle_key_inner(key);
+        if self.buffer.revision() != revision {
+            self.refresh_syntax();
+        }
+    }
+
+    fn handle_key_inner(&mut self, key: &Key) {
         if !self.replaying
             && self.recording_macro.is_some()
             && self.minibuffer.is_none()
@@ -1872,6 +1903,16 @@ impl Editor {
         self.marks.clear();
         self.last_search = None;
         self.last_ex_pattern = None;
+        self.refresh_syntax();
+    }
+
+    fn refresh_syntax(&mut self) {
+        let source = self
+            .buffer
+            .text(CharOffset(0), CharOffset(self.buffer.len_chars()))
+            .unwrap_or_default();
+        let path = self.buffer.path().map(Path::to_path_buf);
+        self.syntax.refresh(path.as_deref(), &source);
     }
 
     fn resolve_range(
