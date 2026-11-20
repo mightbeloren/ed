@@ -54,11 +54,22 @@ pub fn render(editor: &Editor, focused: bool, visible_rows: usize) -> Div {
     let minibuffer = editor.prompt_text().map_or_else(
         || div().child(editor.message().to_owned()),
         |prompt| {
-            div().flex().w_full().justify_between().child(prompt).child(
-                div()
-                    .text_color(rgb(MUTED_TEXT))
-                    .child(editor.message().to_owned()),
-            )
+            div()
+                .flex()
+                .w_full()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .child(prompt)
+                        .child(div().w(px(2.0)).h(px(18.0)).flex_shrink_0().bg(rgb(ACCENT))),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(MUTED_TEXT))
+                        .child(editor.message().to_owned()),
+                )
         },
     );
 

@@ -61,8 +61,8 @@ Phase 10 is complete:
 - Read-only Rope-backed Dired buffers with ls-style rows
 - Current-directory startup, keyboard entry opening, and parent navigation
 - File quit commands return to Dired; quitting Dired closes the window
-- Asynchronous `:!cmd` execution through `/bin/sh -c`
-- Immediate streaming output buffers through `:run cmd`
+- Background-only `:!cmd` execution with discarded output and exit-status messages
+- Immediate PTY-backed transcript buffers through `:run cmd`
 - Shell file-argument completion with Tab for `:!cmd` and `:run cmd`
 - Read-only shell output buffers showing the entered command and exit status
 - Existing `path`, `path:line`, and `path:line:column` output jump targets

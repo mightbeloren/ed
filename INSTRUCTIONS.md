@@ -50,16 +50,16 @@ Shell execution follows an asynchronous request/completion path:
 
 ```text
 normalized input::Key
-→ minibuffer `:!cmd`
+→ minibuffer `:!cmd` or `:run cmd`
 → typed ex::ExCommand::Shell
 → EditorRequest::RunShell
 → GPUI background executor
-→ shell::ShellCompletion
-→ read-only output::OutputState
+├─ `:!` → discarded output → completion status message
+└─ `:run` → PTY chunks → read-only output::OutputState
 → GPUI render
 ```
 
-Keep `/bin/sh -c` process execution out of the UI thread and keep GPUI imports out of `editor`, `shell`, and `output`. `:!cmd` keeps the active buffer visible and captures output at completion; `:run cmd` opens a request-identified output buffer immediately and forwards stdout/stderr chunks through `async-channel`. Apply chunks and completion only while the matching running output remains active, so stale tasks cannot pull the user back after navigation. Output buffers begin with `$ cmd`. Tab completion for both forms resolves the current whitespace-delimited filesystem argument relative to the command working directory; it does not complete executable names. Output jump targets use the same working directory. Before replacing the active buffer with completed output, preserve modified user data; tests must cover launch-time and completion-time modification races. Delayed `:!` output places stdout before stderr; streamed `:run` output uses observed chunk arrival order.
+Keep shell process execution out of the UI thread and keep GPUI imports out of `editor`, `shell`, and `output`. `:!cmd` runs `/bin/sh -c` in the background with stdout/stderr redirected to null and reports only completion status; it must never replace the active buffer. `:run cmd` opens a request-identified output buffer immediately and uses util-linux `/usr/bin/script -qefc` to allocate a PTY, forwarding normalized transcript chunks through `async-channel`. Apply chunks and completion only while the matching running output remains active, so stale tasks cannot pull the user back after navigation. PTY normalization strips ANSI control sequences and turns carriage-return redraws into transcript lines; this is not a fully interactive terminal emulator. Output buffers begin with `$ cmd`. Tab completion for both forms resolves the current whitespace-delimited filesystem argument relative to the command working directory; it does not complete executable names. Output jump targets use the same working directory. Before `:run` replaces the active buffer, preserve modified user data; background `:!` is safe from modified buffers.
 
 Dired listing text remains read-only. If writable Dired is added later, implement it as an explicit `wdired`-style filesystem-operation mode with validated rename operations, not by treating arbitrary listing edits as a normal buffer save.
 

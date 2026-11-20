@@ -67,7 +67,7 @@ impl EditorApp {
                                     app.editor.append_shell_output(request_id, &text);
                                 }
                                 ShellStreamEvent::Finished(completion) => {
-                                    app.editor.finish_shell(completion, true);
+                                    app.editor.finish_shell(completion);
                                 }
                             }
                             cx.notify();
@@ -84,10 +84,10 @@ impl EditorApp {
             cx.spawn(async move |this, cx| {
                 let completion = cx
                     .background_executor()
-                    .spawn(async move { shell::run(request) })
+                    .spawn(async move { shell::run_background(request) })
                     .await;
                 let _ = this.update(cx, move |app, cx| {
-                    app.editor.finish_shell(completion, false);
+                    app.editor.finish_background_shell(completion);
                     cx.notify();
                 });
             })

@@ -109,20 +109,20 @@ Dired intentionally remains read-only. Emacs-style writable Dired (`wdired`) wou
 
 ### Shell commands and output buffers
 
-- `:!cmd` runs asynchronously through `/bin/sh -c`, keeps the current buffer visible while running, and opens output when the command finishes
-- `:run cmd` immediately opens a read-only output buffer and streams stdout/stderr into it while the process runs
-- Output buffers begin with `$ cmd`, preserving the exact command entered for both `:!cmd` and `:run cmd`
+- `:!cmd` runs asynchronously through `/bin/sh -c`, keeps the current buffer visible, discards stdout/stderr, and reports only its final exit status
+- `:run cmd` immediately opens a read-only PTY-backed transcript buffer and streams output while the process runs
+- `:run` output begins with `$ cmd`, preserving the exact command entered
 - Tab completes the current filesystem argument for both forms, such as `:!cat src/fi<Tab>` → `:!cat src/file.txt `
 - Leaving a running `:run` output buffer prevents chunks or late completion from pulling focus back to that buffer
 - The working directory follows the current Dired directory, output-buffer directory, or file directory
-- Standard output and standard error are captured in a read-only output buffer
-- Exit status and success/failure appear in the status bar
+- PTY output is normalized into readable transcript text in a read-only output buffer
+- `:run` exit status and success/failure appear in the status bar
 - Enter opens an existing `path`, `path:line`, or `path:line:column` target on the current output line
 - Relative targets resolve against the command's working directory
 - `:q` and `:q!` from output, or from a target opened through output, return to Dired at that working directory
-- Modified file buffers must be written or discarded before starting a shell command; a completion also refuses to replace a file changed while the command ran
+- Modified file buffers must be written or discarded before `:run` replaces them; background `:!cmd` is allowed without writing
 
-`:!cmd` captures output at process completion and shows stdout before stderr, so their original interleaving is not preserved. `:run cmd` streams both pipes as chunks and therefore reflects their observed arrival order. File completion and target parsing currently focus on whitespace-delimited shell/compiler formats; quoting, escaped spaces, and paths containing spaces are not comprehensively supported.
+`:run` uses Linux util-linux `/usr/bin/script` to allocate a PTY, so programs detect a terminal and flush terminal-oriented output in real time. ANSI control sequences are removed and carriage-return redraws become readable transcript lines. This is a PTY-backed command transcript, not a fully interactive terminal emulator: keyboard input is not forwarded to the child and terminal colors/cursor positioning are not rendered. File completion and target parsing currently focus on whitespace-delimited shell/compiler formats; quoting, escaped spaces, and paths containing spaces are not comprehensively supported.
 
 ## UI
 
@@ -131,7 +131,7 @@ Dired intentionally remains read-only. Emacs-style writable Dired (`wdired`) wou
 - Absolute cursor line number with relative surrounding line numbers
 - Keyboard-only cursor and viewport navigation
 - Status bar showing mode, file, modified state, and cursor position
-- Bottom minibuffer row reserved for search, Ex, and shell commands
+- Bottom minibuffer row with a visible caret for search, Ex, and shell commands
 
 There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven editing controls.
 

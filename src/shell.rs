@@ -34,26 +34,18 @@ pub enum ShellStreamEvent {
     Finished(ShellCompletion),
 }
 
-pub fn run(request: ShellRequest) -> ShellCompletion {
+pub fn run_background(request: ShellRequest) -> ShellCompletion {
     let result = Command::new("/bin/sh")
         .arg("-c")
         .arg(&request.command)
         .current_dir(&request.cwd)
-        .output()
-        .map(|output| {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                if !text.is_empty() && !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push_str(&stderr);
-            }
-            ShellResult {
-                output: text,
-                exit_code: output.status.code(),
-                success: output.status.success(),
-            }
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| ShellResult {
+            output: String::new(),
+            exit_code: status.code(),
+            success: status.success(),
         });
     ShellCompletion { request, result }
 }
@@ -70,9 +62,10 @@ fn stream_process(
     request: &ShellRequest,
     events: &Sender<ShellStreamEvent>,
 ) -> io::Result<ShellResult> {
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
+    let mut child = Command::new("/usr/bin/script")
+        .arg("-qefc")
         .arg(&request.command)
+        .arg("/dev/null")
         .current_dir(&request.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -108,19 +101,110 @@ fn spawn_reader<R: Read + Send + 'static>(
 ) -> thread::JoinHandle<io::Result<()>> {
     thread::spawn(move || {
         let mut bytes = [0; 4096];
+        let mut filter = TerminalFilter::default();
         loop {
             let count = reader.read(&mut bytes)?;
             if count == 0 {
+                let text = filter.finish();
+                emit_chunk(request_id, text, &output, &events)?;
                 return Ok(());
             }
-            let text = String::from_utf8_lossy(&bytes[..count]).into_owned();
-            let mut output = output
-                .lock()
-                .map_err(|_| io::Error::other("shell output lock poisoned"))?;
-            output.push_str(&text);
-            let _ = events.send_blocking(ShellStreamEvent::Chunk { request_id, text });
+            let text = filter.push(&bytes[..count]);
+            emit_chunk(request_id, text, &output, &events)?;
         }
     })
+}
+
+fn emit_chunk(
+    request_id: u64,
+    text: String,
+    output: &Mutex<String>,
+    events: &Sender<ShellStreamEvent>,
+) -> io::Result<()> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    let mut output = output
+        .lock()
+        .map_err(|_| io::Error::other("shell output lock poisoned"))?;
+    output.push_str(&text);
+    let _ = events.send_blocking(ShellStreamEvent::Chunk { request_id, text });
+    Ok(())
+}
+
+#[derive(Default)]
+struct TerminalFilter {
+    escape: EscapeState,
+    pending_carriage_return: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+enum EscapeState {
+    #[default]
+    Ground,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+impl TerminalFilter {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        let mut visible = Vec::with_capacity(bytes.len());
+        for &byte in bytes {
+            match self.escape {
+                EscapeState::Ground => {
+                    if self.pending_carriage_return {
+                        visible.push(b'\n');
+                        self.pending_carriage_return = false;
+                        if byte == b'\n' {
+                            continue;
+                        }
+                    }
+                    match byte {
+                        b'\x1b' => self.escape = EscapeState::Escape,
+                        b'\r' => self.pending_carriage_return = true,
+                        b'\n' | b'\t' | b' '..=b'~' | 0x80..=0xff => visible.push(byte),
+                        _ => {}
+                    }
+                }
+                EscapeState::Escape => {
+                    self.escape = match byte {
+                        b'[' => EscapeState::Csi,
+                        b']' => EscapeState::Osc,
+                        _ => EscapeState::Ground,
+                    }
+                }
+                EscapeState::Csi => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        self.escape = EscapeState::Ground;
+                    }
+                }
+                EscapeState::Osc => match byte {
+                    b'\x07' => self.escape = EscapeState::Ground,
+                    b'\x1b' => self.escape = EscapeState::OscEscape,
+                    _ => {}
+                },
+                EscapeState::OscEscape => {
+                    self.escape = if byte == b'\\' {
+                        EscapeState::Ground
+                    } else {
+                        EscapeState::Osc
+                    };
+                }
+            }
+        }
+        String::from_utf8_lossy(&visible).into_owned()
+    }
+
+    fn finish(&mut self) -> String {
+        if self.pending_carriage_return {
+            self.pending_carriage_return = false;
+            "\n".to_owned()
+        } else {
+            String::new()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -128,17 +212,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn captures_output_and_nonzero_exit_status() {
-        let completion = run(ShellRequest {
-            id: 1,
-            command: "printf stdout; printf stderr >&2; exit 7".to_owned(),
+    fn background_commands_discard_output_and_report_status() {
+        let completion = run_background(ShellRequest {
+            id: 2,
+            command: "printf ignored; exit 4".to_owned(),
             cwd: std::env::current_dir().expect("current directory"),
         });
-        let result = completion.result.expect("run shell command");
+        let result = completion.result.expect("run background command");
 
-        assert_eq!(result.output, "stdout\nstderr");
-        assert_eq!(result.exit_code, Some(7));
+        assert_eq!(result.output, "");
+        assert_eq!(result.exit_code, Some(4));
         assert!(!result.success);
+    }
+
+    #[test]
+    fn terminal_filter_removes_escapes_and_normalizes_carriage_returns() {
+        let mut filter = TerminalFilter::default();
+        let text = filter.push(b"\x1b[31mred\x1b[0m\rnext\r\n");
+
+        assert_eq!(text, "red\nnext\n");
+    }
+
+    #[test]
+    fn streaming_commands_run_inside_a_pty() {
+        let (sender, receiver) = async_channel::unbounded();
+        run_streaming(
+            ShellRequest {
+                id: 6,
+                command: "if [ -t 1 ]; then printf tty; else printf pipe; fi".to_owned(),
+                cwd: std::env::current_dir().expect("current directory"),
+            },
+            sender,
+        );
+        let mut completion = None;
+        while let Ok(event) = receiver.try_recv() {
+            if let ShellStreamEvent::Finished(finished) = event {
+                completion = Some(finished);
+            }
+        }
+
+        assert_eq!(
+            completion
+                .expect("stream completion")
+                .result
+                .expect("stream result")
+                .output,
+            "tty"
+        );
     }
 
     #[test]
