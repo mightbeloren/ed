@@ -10,7 +10,7 @@ use crate::{
     dired::{self, DiredCommand, DiredState},
     ex::{self, Address, ExCommand, GlobalAction, RangeSeparator, RangeSpec, Substitute},
     input::{Key, KeyValue},
-    minibuffer::{Minibuffer, MinibufferKind},
+    minibuffer::{Minibuffer, MinibufferKind, ShellCommandCompletion},
     navigation::{ChangeList, JumpList},
     output::{JumpTarget, OutputState},
     search::{self, Search},
@@ -40,7 +40,10 @@ pub struct Viewport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EditorRequest {
     Close,
-    RunShell(ShellRequest),
+    RunShell {
+        request: ShellRequest,
+        open_immediately: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +89,7 @@ pub struct Editor {
     last_search: Option<Search>,
     last_ex_pattern: Option<String>,
     request: Option<EditorRequest>,
+    next_shell_request_id: u64,
     replaying: bool,
 }
 
@@ -163,6 +167,7 @@ impl Editor {
             last_search: None,
             last_ex_pattern: None,
             request: None,
+            next_shell_request_id: 1,
             replaying: false,
         }
     }
@@ -213,8 +218,17 @@ impl Editor {
         self.request.take()
     }
 
-    pub fn finish_shell(&mut self, completion: ShellCompletion) {
-        if !self.is_read_only_special() && self.buffer.is_modified() {
+    pub fn finish_shell(&mut self, completion: ShellCompletion, open_immediately: bool) {
+        if open_immediately {
+            let request_id = completion.request.id;
+            if !self
+                .output
+                .as_ref()
+                .is_some_and(|output| output.is_running_request(request_id))
+            {
+                return;
+            }
+        } else if !self.is_read_only_special() && self.buffer.is_modified() {
             self.message =
                 "Shell finished, but output was not opened because the buffer changed".to_owned();
             return;
@@ -1325,6 +1339,24 @@ impl Editor {
                     MinibufferKind::Ex => self.submit_ex(&minibuffer.text),
                 }
             }
+            KeyValue::Named(name) if name == "tab" => {
+                let completion = self.minibuffer.as_mut().map_or(
+                    ShellCommandCompletion::None,
+                    Minibuffer::complete_shell_command,
+                );
+                self.message = match completion {
+                    ShellCommandCompletion::None => "No shell command completion".to_owned(),
+                    ShellCommandCompletion::Completed => String::new(),
+                    ShellCommandCompletion::Candidates(candidates) => {
+                        let visible = candidates
+                            .into_iter()
+                            .take(8)
+                            .collect::<Vec<_>>()
+                            .join("  ");
+                        format!("Matches: {visible}")
+                    }
+                };
+            }
             KeyValue::Named(name) if name == "u" && key.modifiers.control => {
                 if let Some(minibuffer) = &mut self.minibuffer {
                     minibuffer.text.clear();
@@ -1546,15 +1578,30 @@ impl Editor {
                 }
                 Err(error) => self.message = error,
             },
-            ExCommand::Shell { command } => {
+            ExCommand::Shell {
+                command,
+                open_immediately,
+            } => {
                 if !self.is_read_only_special() && self.buffer.is_modified() {
                     self.message =
                         "Write or discard changes before running a shell command".to_owned();
                     return;
                 }
-                let cwd = self.working_directory();
-                self.message = format!("Running: {command}");
-                self.request = Some(EditorRequest::RunShell(ShellRequest { command, cwd }));
+                let request = ShellRequest {
+                    id: self.next_shell_request_id,
+                    command,
+                    cwd: self.working_directory(),
+                };
+                self.next_shell_request_id = self.next_shell_request_id.wrapping_add(1).max(1);
+                self.message = format!("Running: {}", request.command);
+                if open_immediately {
+                    let (buffer, output) = OutputState::running(&request);
+                    self.replace_buffer(buffer, None, Some(output));
+                }
+                self.request = Some(EditorRequest::RunShell {
+                    request,
+                    open_immediately,
+                });
             }
         }
     }
@@ -3091,20 +3138,26 @@ mod tests {
         let mut editor = Editor::open(&path);
         execute_ex_keys(&mut editor, "!printf output");
         let request = match editor.take_request() {
-            Some(EditorRequest::RunShell(request)) => request,
-            other => panic!("expected shell request, got {other:?}"),
+            Some(EditorRequest::RunShell {
+                request,
+                open_immediately: false,
+            }) => request,
+            other => panic!("expected delayed shell request, got {other:?}"),
         };
         type_keys(&mut editor, "A!");
         editor.handle_key(&named("escape"));
 
-        editor.finish_shell(ShellCompletion {
-            request,
-            result: Ok(crate::shell::ShellResult {
-                output: "output".to_owned(),
-                exit_code: Some(0),
-                success: true,
-            }),
-        });
+        editor.finish_shell(
+            ShellCompletion {
+                request,
+                result: Ok(crate::shell::ShellResult {
+                    output: "output".to_owned(),
+                    exit_code: Some(0),
+                    success: true,
+                }),
+            },
+            false,
+        );
 
         assert!(!editor.is_output());
         assert_eq!(editor.buffer.path(), Some(path.as_path()));
@@ -3113,6 +3166,81 @@ mod tests {
             editor.message(),
             "Shell finished, but output was not opened because the buffer changed"
         );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn run_opens_a_matching_output_buffer_before_completion() {
+        let directory = temporary_directory("shell-immediate-output");
+        fs::create_dir(&directory).expect("create test directory");
+
+        let mut editor = Editor::dired(&directory);
+        execute_ex_keys(&mut editor, "run printf output");
+
+        assert!(editor.is_output());
+        assert!(editor.display_name().contains("[running]"));
+        assert_eq!(
+            editor.buffer.line_text(0).as_deref(),
+            Some("(command running...)")
+        );
+        let request = match editor.take_request() {
+            Some(EditorRequest::RunShell {
+                request,
+                open_immediately: true,
+            }) => request,
+            other => panic!("expected immediate shell request, got {other:?}"),
+        };
+        editor.finish_shell(
+            ShellCompletion {
+                request,
+                result: Ok(crate::shell::ShellResult {
+                    output: "output".to_owned(),
+                    exit_code: Some(0),
+                    success: true,
+                }),
+            },
+            true,
+        );
+
+        assert!(editor.is_output());
+        assert!(editor.display_name().contains("exit 0, ok"));
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("output"));
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn leaving_a_running_output_ignores_its_late_completion() {
+        let directory = temporary_directory("shell-immediate-stale");
+        fs::create_dir(&directory).expect("create test directory");
+
+        let mut editor = Editor::dired(&directory);
+        execute_ex_keys(&mut editor, "run printf output");
+        let request = match editor.take_request() {
+            Some(EditorRequest::RunShell {
+                request,
+                open_immediately: true,
+            }) => request,
+            other => panic!("expected immediate shell request, got {other:?}"),
+        };
+        execute_ex_keys(&mut editor, "q");
+        assert!(editor.is_dired());
+
+        editor.finish_shell(
+            ShellCompletion {
+                request,
+                result: Ok(crate::shell::ShellResult {
+                    output: "output".to_owned(),
+                    exit_code: Some(0),
+                    success: true,
+                }),
+            },
+            true,
+        );
+
+        assert!(editor.is_dired());
+        assert!(!editor.is_output());
 
         fs::remove_dir_all(directory).expect("remove test directory");
     }
@@ -3127,21 +3255,27 @@ mod tests {
         let mut editor = Editor::dired(&directory);
         execute_ex_keys(&mut editor, "!printf main.rs:3:2");
         let request = match editor.take_request() {
-            Some(EditorRequest::RunShell(request)) => request,
-            other => panic!("expected shell request, got {other:?}"),
+            Some(EditorRequest::RunShell {
+                request,
+                open_immediately: false,
+            }) => request,
+            other => panic!("expected delayed shell request, got {other:?}"),
         };
         assert_eq!(
             request.cwd,
             directory.canonicalize().expect("canonical directory")
         );
-        editor.finish_shell(ShellCompletion {
-            request,
-            result: Ok(crate::shell::ShellResult {
-                output: "main.rs:3:2: error".to_owned(),
-                exit_code: Some(1),
-                success: false,
-            }),
-        });
+        editor.finish_shell(
+            ShellCompletion {
+                request,
+                result: Ok(crate::shell::ShellResult {
+                    output: "main.rs:3:2: error".to_owned(),
+                    exit_code: Some(1),
+                    success: false,
+                }),
+            },
+            false,
+        );
 
         assert!(editor.is_output());
         assert!(editor.display_name().contains("exit 1, failed"));
@@ -3171,18 +3305,22 @@ mod tests {
     #[test]
     fn output_enter_without_a_target_reports_an_error() {
         let request = ShellRequest {
+            id: 1,
             command: "printf hello".to_owned(),
             cwd: std::env::current_dir().expect("current directory"),
         };
         let mut editor = Editor::scratch();
-        editor.finish_shell(ShellCompletion {
-            request,
-            result: Ok(crate::shell::ShellResult {
-                output: "hello".to_owned(),
-                exit_code: Some(0),
-                success: true,
-            }),
-        });
+        editor.finish_shell(
+            ShellCompletion {
+                request,
+                result: Ok(crate::shell::ShellResult {
+                    output: "hello".to_owned(),
+                    exit_code: Some(0),
+                    success: true,
+                }),
+            },
+            false,
+        );
 
         editor.handle_key(&named("enter"));
 

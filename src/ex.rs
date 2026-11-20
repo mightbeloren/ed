@@ -75,6 +75,7 @@ pub enum ExCommand {
     },
     Shell {
         command: String,
+        open_immediately: bool,
     },
 }
 
@@ -112,6 +113,7 @@ pub fn parse(input: &str) -> Result<ExCommand, ExError> {
         }
         return Ok(ExCommand::Shell {
             command: command.to_owned(),
+            open_immediately: false,
         });
     }
 
@@ -160,6 +162,17 @@ pub fn parse(input: &str) -> Result<ExCommand, ExError> {
         "g" | "global" => parse_global(range, arguments, false),
         "v" | "vglobal" => parse_global(range, arguments, true),
         "d" | "delete" => no_arguments(arguments, ExCommand::Delete { range }),
+        "run" => {
+            require_default_range(&range)?;
+            if arguments.is_empty() {
+                Err(ExError("Missing shell command".to_owned()))
+            } else {
+                Ok(ExCommand::Shell {
+                    command: arguments.to_owned(),
+                    open_immediately: true,
+                })
+            }
+        }
         _ => Err(ExError(format!("Not an editor command: {name}"))),
     }
 }
@@ -380,10 +393,22 @@ mod tests {
         assert_eq!(
             parse("!printf hello"),
             Ok(ExCommand::Shell {
-                command: "printf hello".to_owned()
+                command: "printf hello".to_owned(),
+                open_immediately: false
+            })
+        );
+        assert_eq!(
+            parse("run cargo test"),
+            Ok(ExCommand::Shell {
+                command: "cargo test".to_owned(),
+                open_immediately: true
             })
         );
         assert_eq!(parse("!"), Err(ExError("Missing shell command".to_owned())));
+        assert_eq!(
+            parse("run"),
+            Err(ExError("Missing shell command".to_owned()))
+        );
     }
 
     #[test]

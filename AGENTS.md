@@ -62,6 +62,8 @@ Phase 10 is complete:
 - Current-directory startup, keyboard entry opening, and parent navigation
 - File quit commands return to Dired; quitting Dired closes the window
 - Asynchronous `:!cmd` execution through `/bin/sh -c`
+- Immediate running output buffers through `:run cmd`
+- `PATH` executable completion with Tab for `:!command` and `:run command`
 - Read-only shell output buffers with exit status
 - Existing `path`, `path:line`, and `path:line:column` output jump targets
 - Output and opened-target quit behavior returns to the command working-directory Dired

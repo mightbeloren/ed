@@ -19,15 +19,38 @@ pub struct JumpTarget {
 
 #[derive(Debug)]
 pub struct OutputState {
+    request_id: u64,
     command: String,
     cwd: PathBuf,
-    exit_code: Option<i32>,
-    success: bool,
+    status: OutputStatus,
     targets: Vec<Option<JumpTarget>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum OutputStatus {
+    Running,
+    Finished {
+        exit_code: Option<i32>,
+        success: bool,
+    },
+}
+
 impl OutputState {
+    pub fn running(request: &crate::shell::ShellRequest) -> (Buffer, Self) {
+        (
+            Buffer::from_text("(command running...)"),
+            Self {
+                request_id: request.id,
+                command: request.command.clone(),
+                cwd: request.cwd.clone(),
+                status: OutputStatus::Running,
+                targets: vec![None],
+            },
+        )
+    }
+
     pub fn from_completion(completion: ShellCompletion) -> (Buffer, Self) {
+        let request_id = completion.request.id;
         let command = completion.request.command;
         let cwd = completion.request.cwd;
         let ShellResult {
@@ -49,10 +72,10 @@ impl OutputState {
         (
             Buffer::from_text(&output),
             Self {
+                request_id,
                 command,
                 cwd,
-                exit_code,
-                success,
+                status: OutputStatus::Finished { exit_code, success },
                 targets,
             },
         )
@@ -66,12 +89,20 @@ impl OutputState {
         self.targets.get(line)?.as_ref()
     }
 
+    pub fn is_running_request(&self, request_id: u64) -> bool {
+        self.request_id == request_id && matches!(self.status, OutputStatus::Running)
+    }
+
     pub fn display_name(&self) -> String {
-        let status = self
-            .exit_code
-            .map_or_else(|| "signal".to_owned(), |code| format!("exit {code}"));
-        let outcome = if self.success { "ok" } else { "failed" };
-        format!("Output: {} [{status}, {outcome}]", self.command)
+        match self.status {
+            OutputStatus::Running => format!("Output: {} [running]", self.command),
+            OutputStatus::Finished { exit_code, success } => {
+                let status =
+                    exit_code.map_or_else(|| "signal".to_owned(), |code| format!("exit {code}"));
+                let outcome = if success { "ok" } else { "failed" };
+                format!("Output: {} [{status}, {outcome}]", self.command)
+            }
+        }
     }
 }
 

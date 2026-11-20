@@ -38,8 +38,11 @@ impl EditorApp {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
         let request = match self.editor.take_request() {
-            Some(EditorRequest::RunShell(request)) => {
-                Self::run_shell(request, cx);
+            Some(EditorRequest::RunShell {
+                request,
+                open_immediately,
+            }) => {
+                Self::run_shell(request, open_immediately, cx);
                 None
             }
             request => request,
@@ -48,14 +51,14 @@ impl EditorApp {
         request
     }
 
-    fn run_shell(request: ShellRequest, cx: &mut Context<Self>) {
+    fn run_shell(request: ShellRequest, open_immediately: bool, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let completion = cx
                 .background_executor()
                 .spawn(async move { shell::run(request) })
                 .await;
             let _ = this.update(cx, move |app, cx| {
-                app.editor.finish_shell(completion);
+                app.editor.finish_shell(completion, open_immediately);
                 cx.notify();
             });
         })

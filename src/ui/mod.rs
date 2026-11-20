@@ -51,6 +51,16 @@ pub fn render(editor: &Editor, focused: bool, visible_rows: usize) -> Div {
     } else {
         editor.mode().label()
     };
+    let minibuffer = editor.prompt_text().map_or_else(
+        || div().child(editor.message().to_owned()),
+        |prompt| {
+            div().flex().w_full().justify_between().child(prompt).child(
+                div()
+                    .text_color(rgb(MUTED_TEXT))
+                    .child(editor.message().to_owned()),
+            )
+        },
+    );
 
     div()
         .flex()
@@ -95,11 +105,7 @@ pub fn render(editor: &Editor, focused: bool, visible_rows: usize) -> Div {
                 .items_center()
                 .px_2()
                 .bg(rgb(SURFACE))
-                .child(
-                    editor
-                        .prompt_text()
-                        .unwrap_or_else(|| editor.message().to_owned()),
-                ),
+                .child(minibuffer),
         )
 }
 

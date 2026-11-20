@@ -108,7 +108,10 @@ Dired intentionally remains read-only. Emacs-style writable Dired (`wdired`) wou
 
 ### Shell commands and output buffers
 
-- `:!cmd` runs asynchronously through `/bin/sh -c` without blocking the GPUI thread
+- `:!cmd` runs asynchronously through `/bin/sh -c`, keeps the current buffer visible while running, and opens output when the command finishes
+- `:run cmd` immediately opens a read-only output buffer with a running status, then replaces its placeholder text when the command finishes
+- Tab completes the executable token for both `:!command` and `:run command` from executable files found on `PATH`
+- Leaving a running `:run` output buffer prevents its late completion from pulling focus back to that buffer
 - The working directory follows the current Dired directory, output-buffer directory, or file directory
 - Standard output and standard error are captured in a read-only output buffer
 - Exit status and success/failure appear in the status bar
@@ -117,7 +120,7 @@ Dired intentionally remains read-only. Emacs-style writable Dired (`wdired`) wou
 - `:q` and `:q!` from output, or from a target opened through output, return to Dired at that working directory
 - Modified file buffers must be written or discarded before starting a shell command; a completion also refuses to replace a file changed while the command ran
 
-Standard output is shown before standard error when both are present, so their original interleaving is not preserved. Target parsing currently focuses on common whitespace-delimited compiler and grep formats; paths containing spaces are not comprehensively supported.
+Shell output is captured at process completion rather than streamed incrementally. Standard output is shown before standard error when both are present, so their original interleaving is not preserved. Target parsing currently focuses on common whitespace-delimited compiler and grep formats; paths containing spaces are not comprehensively supported.
 
 ## UI
 

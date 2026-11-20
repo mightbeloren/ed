@@ -2,6 +2,7 @@ use std::{io, path::PathBuf, process::Command};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShellRequest {
+    pub id: u64,
     pub command: String,
     pub cwd: PathBuf,
 }
@@ -50,6 +51,7 @@ mod tests {
     #[test]
     fn captures_output_and_nonzero_exit_status() {
         let completion = run(ShellRequest {
+            id: 1,
             command: "printf stdout; printf stderr >&2; exit 7".to_owned(),
             cwd: std::env::current_dir().expect("current directory"),
         });
