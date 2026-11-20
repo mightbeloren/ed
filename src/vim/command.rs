@@ -30,6 +30,22 @@ pub enum Command {
         count: u32,
         register: RegisterName,
     },
+    Undo {
+        count: u32,
+    },
+    Redo {
+        count: u32,
+    },
+    BeginMacro {
+        register: char,
+    },
+    PlayMacro {
+        register: Option<char>,
+        count: u32,
+    },
+    RepeatChange {
+        count: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

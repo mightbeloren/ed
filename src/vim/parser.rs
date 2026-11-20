@@ -31,6 +31,8 @@ pub struct NormalParser {
     pending_find: Option<PendingFind>,
     pending_replace: bool,
     pending_text_object: Option<TextObjectScope>,
+    pending_macro_record: bool,
+    pending_macro_play: bool,
 }
 
 impl NormalParser {
@@ -65,13 +67,48 @@ impl NormalParser {
         self.pending_find = None;
         self.pending_replace = false;
         self.pending_text_object = None;
+        self.pending_macro_record = false;
+        self.pending_macro_play = false;
     }
 
     pub fn is_operator_pending(&self) -> bool {
         self.operator.is_some()
     }
 
+    pub fn redo_command(&mut self) -> Command {
+        let command = Command::Redo {
+            count: self.take_count().unwrap_or(1),
+        };
+        self.reset();
+        command
+    }
+
     fn parse_character(&mut self, character: char) -> Option<Command> {
+        if self.pending_macro_record {
+            self.reset();
+            return character
+                .is_ascii_alphabetic()
+                .then_some(Command::BeginMacro {
+                    register: character.to_ascii_lowercase(),
+                });
+        }
+        if self.pending_macro_play {
+            let count = self.take_count().unwrap_or(1);
+            self.reset();
+            return if character == '@' {
+                Some(Command::PlayMacro {
+                    register: None,
+                    count,
+                })
+            } else {
+                character
+                    .is_ascii_alphabetic()
+                    .then_some(Command::PlayMacro {
+                        register: Some(character.to_ascii_lowercase()),
+                        count,
+                    })
+            };
+        }
         if self.pending_replace {
             self.pending_replace = false;
             let count = self.take_count().unwrap_or(1);
@@ -228,6 +265,16 @@ impl NormalParser {
             '-' => Some(self.motion(Motion::PreviousLineFirstNonBlank)),
             'p' => Some(self.paste(true)),
             'P' => Some(self.paste(false)),
+            'u' => Some(self.undo()),
+            '.' => Some(self.repeat_change()),
+            'q' => {
+                self.pending_macro_record = true;
+                None
+            }
+            '@' => {
+                self.pending_macro_play = true;
+                None
+            }
             'x' => Some(self.delete_characters(false)),
             'X' => Some(self.delete_characters(true)),
             'v' => Some(self.enter_visual(VisualKind::Character)),
@@ -427,6 +474,22 @@ impl NormalParser {
         command
     }
 
+    fn undo(&mut self) -> Command {
+        let command = Command::Undo {
+            count: self.take_count().unwrap_or(1),
+        };
+        self.reset();
+        command
+    }
+
+    fn repeat_change(&mut self) -> Command {
+        let command = Command::RepeatChange {
+            count: self.take_count().unwrap_or(1),
+        };
+        self.reset();
+        command
+    }
+
     fn complete_text_object(&mut self, object: TextObject) -> Command {
         let pending = self.operator.expect("text object requires an operator");
         let count = multiplied_count(pending.count, self.motion_count.take().unwrap_or(1));
@@ -553,6 +616,23 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn parses_undo_macro_and_repeat_commands() {
+        assert_eq!(parse_keys("3u"), Some(Command::Undo { count: 3 }));
+        assert_eq!(
+            parse_keys("qa"),
+            Some(Command::BeginMacro { register: 'a' })
+        );
+        assert_eq!(
+            parse_keys("2@a"),
+            Some(Command::PlayMacro {
+                register: Some('a'),
+                count: 2
+            })
+        );
+        assert_eq!(parse_keys("4."), Some(Command::RepeatChange { count: 4 }));
     }
 
     #[test]

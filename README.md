@@ -2,7 +2,7 @@
 
 A Vim-first, keyboard-only text editor for Linux, built in Rust with GPUI.
 
-The project is implemented one validated, committed phase at a time. **Phase 5 is complete.**
+The project is implemented one validated, committed phase at a time. **Phase 6 is complete.**
 
 ## Dependency baseline
 
@@ -54,7 +54,16 @@ Without a path, `ed` opens an unnamed scratch buffer. `Ctrl-s` atomically saves 
 - Unnamed, named/append, numbered, yank (`0`), small-delete (`-`), black-hole (`_`), clipboard (`+`), and primary (`*`) registers
 - GPUI system clipboard synchronization for `+` and `*`
 
-Insert, Replace, change, and block-insert sessions are grouped into logical edit transactions in preparation for the undo tree.
+Insert, Replace, change, and block-insert sessions are grouped into logical edit transactions.
+
+### History and replay
+
+- Branching undo tree with `u` and `Ctrl-r`
+- Counted undo and redo
+- Macro recording with `q{register}`
+- Macro playback with `@{register}`, `@@`, and counts
+- Dot-repeat with `.`, including counted repeat
+- Saved/modified state follows the current undo-tree node
 
 ## UI
 
@@ -77,14 +86,14 @@ There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven 
 | 3 | Complete | Generic operators and motions, registers, operator-pending mode |
 | 4 | **Complete** | Visual char/line/block, selection operators, block edits, Replace mode, `x`/`r` |
 | 5 | **Complete** | Text objects, full register families, clipboard bridge, character/line/block paste |
-| 6 | Next | Undo tree, macros, and dot-repeat |
-| 7 | Planned | Search (`/`, `?`, `n`, `N`, `*`, `#`), marks, jump/change lists |
+| 6 | **Complete** | Branching undo tree, macros, and dot-repeat |
+| 7 | Next | Search (`/`, `?`, `n`, `N`, `*`, `#`), marks, jump/change lists |
 | 8 | Planned | Minibuffer and Ex commands (`:w`, `:q`, `:e`, `:s`, `:g`, ranges) |
 | 9 | Planned | Dired directory buffers |
 | 10 | Planned | Async shell runner, output buffers, path jump targets |
 | 11 | Planned | Runtime Tree-sitter language plugins and themes |
 | 12 | Planned | Vim compatibility hardening, Unicode/large-file testing, profiling |
 
-Search and `:` commands are therefore expected to be unavailable at Phase 5.
+Search, marks, and jump/change lists are therefore expected to be unavailable until Phase 7. `:` commands arrive in Phase 8.
 
 See `AGENTS.md` for architecture constraints and `INSTRUCTIONS.md` for the development and testing workflow.

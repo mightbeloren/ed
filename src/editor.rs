@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use crate::{
     buffer::{Buffer, BufferPosition, CharOffset},
@@ -46,6 +46,12 @@ pub struct Editor {
     visible_rows: usize,
     visible_columns: usize,
     message: String,
+    macros: HashMap<char, Vec<Key>>,
+    recording_macro: Option<(char, Vec<Key>)>,
+    last_macro: Option<char>,
+    pending_change_keys: Vec<Key>,
+    last_change_keys: Vec<Key>,
+    replaying: bool,
 }
 
 impl Editor {
@@ -78,6 +84,12 @@ impl Editor {
             visible_rows: DEFAULT_VISIBLE_ROWS,
             visible_columns: DEFAULT_VISIBLE_COLUMNS,
             message,
+            macros: HashMap::new(),
+            recording_macro: None,
+            last_macro: None,
+            pending_change_keys: Vec::new(),
+            last_change_keys: Vec::new(),
+            replaying: false,
         }
     }
 
@@ -157,6 +169,26 @@ impl Editor {
     }
 
     pub fn handle_key(&mut self, key: &Key) {
+        if !self.replaying
+            && self.recording_macro.is_some()
+            && self.vim.mode() == Mode::Normal
+            && matches!(&key.value, KeyValue::Character(value) if value == "q")
+        {
+            if let Some((register, keys)) = self.recording_macro.take() {
+                self.macros.insert(register, keys);
+            }
+            return;
+        }
+        if !self.replaying
+            && let Some((_, keys)) = &mut self.recording_macro
+        {
+            keys.push(key.clone());
+        }
+        if !self.replaying && (!self.pending_change_keys.is_empty() || starts_change(key)) {
+            self.pending_change_keys.push(key.clone());
+        }
+        let transactions_before = self.buffer.completed_transaction_count();
+
         if matches!(&key.value, KeyValue::Named(name) if name == "s") && key.modifiers.control {
             self.save();
             return;
@@ -177,6 +209,18 @@ impl Editor {
             }
             Mode::Insert => self.handle_insert_key(key),
             Mode::Replace => self.handle_replace_key(key),
+        }
+
+        if !self.replaying
+            && self.buffer.completed_transaction_count() > transactions_before
+            && !self.pending_change_keys.is_empty()
+        {
+            self.last_change_keys = std::mem::take(&mut self.pending_change_keys);
+        } else if !self.replaying
+            && matches!(&key.value, KeyValue::Named(name) if name == "escape")
+            && self.vim.mode() == Mode::Normal
+        {
+            self.pending_change_keys.clear();
         }
     }
 
@@ -204,6 +248,17 @@ impl Editor {
                 count,
                 register,
             } => self.paste(after, count, register),
+            Command::Undo { count } => self.undo(count),
+            Command::Redo { count } => self.redo(count),
+            Command::BeginMacro { register } => {
+                self.pending_change_keys.clear();
+                self.recording_macro = Some((register, Vec::new()));
+            }
+            Command::PlayMacro { register, count } => {
+                self.pending_change_keys.clear();
+                self.play_macro(register, count);
+            }
+            Command::RepeatChange { count } => self.repeat_change(count),
         }
     }
 
@@ -1020,6 +1075,71 @@ impl Editor {
         self.ensure_cursor_visible();
     }
 
+    fn undo(&mut self, count: u32) {
+        for _ in 0..count.max(1) {
+            let Some(offset) = self.buffer.undo() else {
+                break;
+            };
+            self.cursor.position = self
+                .buffer
+                .offset_to_position(CharOffset(offset.0.min(self.buffer.len_chars())))
+                .unwrap_or_default();
+        }
+        self.vim.leave_transient_mode();
+        self.visual_anchor = None;
+        self.clamp_cursor_to_mode();
+        self.ensure_cursor_visible();
+    }
+
+    fn redo(&mut self, count: u32) {
+        for _ in 0..count.max(1) {
+            let Some(offset) = self.buffer.redo() else {
+                break;
+            };
+            self.cursor.position = self
+                .buffer
+                .offset_to_position(CharOffset(offset.0.min(self.buffer.len_chars())))
+                .unwrap_or_default();
+        }
+        self.vim.leave_transient_mode();
+        self.visual_anchor = None;
+        self.clamp_cursor_to_mode();
+        self.ensure_cursor_visible();
+    }
+
+    fn play_macro(&mut self, register: Option<char>, count: u32) {
+        let Some(register) = register.or(self.last_macro) else {
+            return;
+        };
+        let Some(keys) = self.macros.get(&register).cloned() else {
+            return;
+        };
+        self.last_macro = Some(register);
+        let was_replaying = self.replaying;
+        self.replaying = true;
+        for _ in 0..count.max(1) {
+            for key in &keys {
+                self.handle_key(key);
+            }
+        }
+        self.replaying = was_replaying;
+    }
+
+    fn repeat_change(&mut self, count: u32) {
+        if self.last_change_keys.is_empty() {
+            return;
+        }
+        let keys = self.last_change_keys.clone();
+        let was_replaying = self.replaying;
+        self.replaying = true;
+        for _ in 0..count.max(1) {
+            for key in &keys {
+                self.handle_key(key);
+            }
+        }
+        self.replaying = was_replaying;
+    }
+
     fn save(&mut self) {
         self.message = match self.buffer.save() {
             Ok(()) => format!("Wrote {}", self.buffer.display_name()),
@@ -1119,6 +1239,20 @@ impl Editor {
             self.viewport.left_character = cursor_character + 1 - self.visible_columns;
         }
     }
+}
+
+fn starts_change(key: &Key) -> bool {
+    matches!(
+        &key.value,
+        KeyValue::Character(value)
+            if value.chars().next().is_some_and(|character| {
+                matches!(
+                    character,
+                    'i' | 'a' | 'I' | 'A' | 'o' | 'O' | 'd' | 'c' | 'x' | 'X'
+                        | 'p' | 'P' | 'r' | 'R' | '>' | '<' | '='
+                )
+            })
+    )
 }
 
 fn ordered_positions(
@@ -1663,6 +1797,72 @@ mod tests {
                 character: 4
             }
         );
+    }
+
+    #[test]
+    fn undo_redo_and_branching_preserve_transactions() {
+        let mut editor = editor_with_text("one");
+        type_keys(&mut editor, "A!");
+        editor.handle_key(&named("escape"));
+        type_keys(&mut editor, "u");
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one"));
+        editor.handle_key(&control_named("r"));
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one!"));
+
+        type_keys(&mut editor, "uA?");
+        editor.handle_key(&named("escape"));
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one?"));
+        assert_eq!(editor.buffer.undo_branch_count(), 2);
+        type_keys(&mut editor, "u");
+        editor.handle_key(&control_named("r"));
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one?"));
+    }
+
+    #[test]
+    fn redo_accepts_a_count() {
+        let mut editor = editor_with_text("one");
+        for value in ['!', '?', '.'] {
+            type_keys(&mut editor, "A");
+            editor.handle_key(&character(value));
+            editor.handle_key(&named("escape"));
+        }
+
+        type_keys(&mut editor, "3u2");
+        editor.handle_key(&control_named("r"));
+
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one!?"));
+    }
+
+    #[test]
+    fn macros_record_play_and_repeat_with_counts() {
+        let mut editor = editor_with_text("one");
+        type_keys(&mut editor, "qaA!");
+        editor.handle_key(&named("escape"));
+        type_keys(&mut editor, "q2@a@@.");
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one!!!!!"));
+    }
+
+    #[test]
+    fn q_in_insert_mode_is_recorded_instead_of_stopping_a_macro() {
+        let mut editor = editor_with_text("one");
+        type_keys(&mut editor, "qaiq");
+        editor.handle_key(&named("escape"));
+        type_keys(&mut editor, "q@a");
+
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("qqone"));
+    }
+
+    #[test]
+    fn dot_repeats_insert_and_operator_changes() {
+        let mut insert = editor_with_text("one");
+        type_keys(&mut insert, "A!");
+        insert.handle_key(&named("escape"));
+        type_keys(&mut insert, ".");
+        assert_eq!(insert.buffer.line_text(0).as_deref(), Some("one!!"));
+
+        let mut operator = editor_with_text("one two three");
+        type_keys(&mut operator, "dw.");
+        assert_eq!(operator.buffer.line_text(0).as_deref(), Some("three"));
     }
 
     fn editor_with_text(text: &str) -> Editor {

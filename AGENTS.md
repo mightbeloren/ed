@@ -32,7 +32,7 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 
 ## Current phase
 
-Phase 5 is complete:
+Phase 6 is complete:
 
 - Rope-backed file buffer, atomic save, viewport, cursor, and relative line numbers
 - Normal and Insert modes
@@ -46,8 +46,12 @@ Phase 5 is complete:
 - Named, numbered, yank, small-delete, black-hole, clipboard, and primary registers
 - Characterwise, linewise, and blockwise paste
 - GPUI clipboard synchronization
+- Branching undo tree with counted undo and redo
+- Macro recording, counted playback, and `@@`
+- Dot-repeat for transactional changes
+- Saved/modified state tied to undo-tree history
 
-See `README.md` for the complete roadmap. Search is Phase 7. Ex commands and `:` minibuffer execution are Phase 8.
+Phase 7 is next: search, marks, jump list, and change list. See `README.md` for the complete roadmap. Ex commands and `:` minibuffer execution are Phase 8.
 
 ## Phase discipline
 

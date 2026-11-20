@@ -19,6 +19,9 @@ impl VimEngine {
         if self.mode == Mode::Normal && is_control_key(key, "v") {
             return Some(Command::EnterVisual(VisualKind::Block));
         }
+        if self.mode == Mode::Normal && is_control_key(key, "r") {
+            return Some(self.normal.redo_command());
+        }
         if !matches!(self.mode, Mode::Normal | Mode::OperatorPending) {
             return None;
         }

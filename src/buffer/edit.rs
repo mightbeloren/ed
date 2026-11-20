@@ -11,3 +11,11 @@ pub struct TextEdit {
     pub deleted_text: String,
     pub inserted_text: String,
 }
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UndoNode {
+    pub parent: Option<usize>,
+    pub children: Vec<usize>,
+    pub preferred_child: Option<usize>,
+    pub transaction: Option<EditTransaction>,
+}

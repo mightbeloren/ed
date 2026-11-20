@@ -9,7 +9,7 @@ use std::{
 
 use ropey::Rope;
 
-use super::{BufferPosition, CharOffset, EditTransaction, InvalidPosition, TextEdit};
+use super::{BufferPosition, CharOffset, EditTransaction, InvalidPosition, TextEdit, UndoNode};
 
 #[derive(Debug)]
 pub enum BufferError {
@@ -45,9 +45,12 @@ pub struct Buffer {
     path: Option<PathBuf>,
     text: Rope,
     revision: u64,
-    saved_revision: u64,
+    saved_undo: usize,
+    untracked_modified: bool,
     active_transaction: Option<EditTransaction>,
     completed_transactions: Vec<EditTransaction>,
+    undo_nodes: Vec<UndoNode>,
+    current_undo: usize,
 }
 
 impl Buffer {
@@ -56,9 +59,12 @@ impl Buffer {
             path: None,
             text: Rope::new(),
             revision: 0,
-            saved_revision: 0,
+            saved_undo: 0,
+            untracked_modified: false,
             active_transaction: None,
             completed_transactions: Vec::new(),
+            undo_nodes: vec![UndoNode::default()],
+            current_undo: 0,
         }
     }
 
@@ -71,9 +77,12 @@ impl Buffer {
             path: Some(path),
             text,
             revision: 0,
-            saved_revision: 0,
+            saved_undo: 0,
+            untracked_modified: false,
             active_transaction: None,
             completed_transactions: Vec::new(),
+            undo_nodes: vec![UndoNode::default()],
+            current_undo: 0,
         })
     }
 
@@ -86,7 +95,12 @@ impl Buffer {
     }
 
     pub fn is_modified(&self) -> bool {
-        self.revision != self.saved_revision
+        self.untracked_modified
+            || self.current_undo != self.saved_undo
+            || self
+                .active_transaction
+                .as_ref()
+                .is_some_and(|transaction| !transaction.edits.is_empty())
     }
 
     pub fn len_chars(&self) -> usize {
@@ -173,12 +187,61 @@ impl Buffer {
         if let Some(transaction) = self.active_transaction.take()
             && !transaction.edits.is_empty()
         {
+            let parent = self.current_undo;
+            let node = self.undo_nodes.len();
+            self.undo_nodes.push(UndoNode {
+                parent: Some(parent),
+                transaction: Some(transaction.clone()),
+                ..UndoNode::default()
+            });
+            self.undo_nodes[parent].children.push(node);
+            self.undo_nodes[parent].preferred_child = Some(node);
+            self.current_undo = node;
             self.completed_transactions.push(transaction);
         }
     }
 
     pub fn completed_transaction_count(&self) -> usize {
         self.completed_transactions.len()
+    }
+
+    pub fn undo(&mut self) -> Option<CharOffset> {
+        let node = self.current_undo;
+        let parent = self.undo_nodes.get(node)?.parent?;
+        let transaction = self.undo_nodes[node].transaction.clone()?;
+        for edit in transaction.edits.iter().rev() {
+            let inserted = edit.inserted_text.chars().count();
+            self.text.remove(edit.start.0..edit.start.0 + inserted);
+            self.text.insert(edit.start.0, &edit.deleted_text);
+        }
+        self.undo_nodes[parent].preferred_child = Some(node);
+        self.current_undo = parent;
+        self.revision = self.revision.wrapping_add(1);
+        transaction.edits.first().map(|edit| edit.start)
+    }
+
+    pub fn redo(&mut self) -> Option<CharOffset> {
+        let node = self.undo_nodes.get(self.current_undo)?;
+        let child = node
+            .preferred_child
+            .or_else(|| node.children.last().copied())?;
+        let transaction = self.undo_nodes[child].transaction.clone()?;
+        for edit in &transaction.edits {
+            let deleted = edit.deleted_text.chars().count();
+            self.text.remove(edit.start.0..edit.start.0 + deleted);
+            self.text.insert(edit.start.0, &edit.inserted_text);
+        }
+        self.current_undo = child;
+        self.revision = self.revision.wrapping_add(1);
+        transaction.edits.first().map(|edit| edit.start)
+    }
+
+    pub fn undo_branch_count(&self) -> usize {
+        self.undo_nodes
+            .iter()
+            .map(|node| node.children.len())
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn insert(&mut self, offset: CharOffset, text: &str) -> Result<(), InvalidPosition> {
@@ -230,6 +293,8 @@ impl Buffer {
         self.revision = self.revision.wrapping_add(1);
         if let Some(transaction) = &mut self.active_transaction {
             transaction.edits.push(edit);
+        } else {
+            self.untracked_modified = true;
         }
     }
 
@@ -241,7 +306,8 @@ impl Buffer {
             let _ = fs::remove_file(&temporary_path);
         }
         result?;
-        self.saved_revision = self.revision;
+        self.saved_undo = self.current_undo;
+        self.untracked_modified = false;
         Ok(())
     }
 
@@ -363,6 +429,43 @@ mod tests {
             "before after"
         );
         assert!(!buffer.is_modified());
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn undoing_to_the_saved_history_node_clears_modified_state() {
+        let directory = std::env::temp_dir().join(format!(
+            "ed-buffer-undo-save-test-{}-{}",
+            process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).expect("create test directory");
+        let path = directory.join("document.txt");
+        fs::write(&path, "before").expect("write fixture");
+
+        let mut buffer = Buffer::open(&path).expect("open fixture");
+        buffer.begin_transaction();
+        buffer
+            .insert(CharOffset(6), " saved")
+            .expect("valid insertion");
+        buffer.commit_transaction();
+        buffer.save().expect("save buffer");
+        assert!(!buffer.is_modified());
+
+        buffer.begin_transaction();
+        buffer
+            .insert(CharOffset(12), " changed")
+            .expect("valid insertion");
+        buffer.commit_transaction();
+        assert!(buffer.is_modified());
+
+        buffer.undo().expect("undo latest transaction");
+        assert_eq!(buffer.line_text(0).as_deref(), Some("before saved"));
+        assert!(!buffer.is_modified());
+
         fs::remove_dir_all(directory).expect("remove test directory");
     }
 }
