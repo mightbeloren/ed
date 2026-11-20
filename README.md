@@ -2,7 +2,7 @@
 
 A Vim-first, keyboard-only text editor for Linux, built in Rust with GPUI.
 
-The project is implemented one validated, committed phase at a time. **Phase 9 is complete.**
+The project is implemented one validated, committed phase at a time. **Phase 10 is complete.**
 
 ## Dependency baseline
 
@@ -104,6 +104,21 @@ Ex matching currently uses Rust regex syntax rather than Vim's distinct regex di
 - `:q`, `:q!`, and successful `:wq` return file buffers to their containing directory
 - `:q` from Dired closes the editor window
 
+Dired intentionally remains read-only. Emacs-style writable Dired (`wdired`) would be a later, dedicated filesystem-operation phase with validated rename operations rather than saving edited listing text.
+
+### Shell commands and output buffers
+
+- `:!cmd` runs asynchronously through `/bin/sh -c` without blocking the GPUI thread
+- The working directory follows the current Dired directory, output-buffer directory, or file directory
+- Standard output and standard error are captured in a read-only output buffer
+- Exit status and success/failure appear in the status bar
+- Enter opens an existing `path`, `path:line`, or `path:line:column` target on the current output line
+- Relative targets resolve against the command's working directory
+- `:q` and `:q!` from output, or from a target opened through output, return to Dired at that working directory
+- Modified file buffers must be written or discarded before starting a shell command; a completion also refuses to replace a file changed while the command ran
+
+Standard output is shown before standard error when both are present, so their original interleaving is not preserved. Target parsing currently focuses on common whitespace-delimited compiler and grep formats; paths containing spaces are not comprehensively supported.
+
 ## UI
 
 - JetBrains Mono throughout
@@ -129,10 +144,10 @@ There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven 
 | 7 | **Complete** | Search (`/`, `?`, `n`, `N`, `*`, `#`), local marks, jump/change lists |
 | 8 | **Complete** | Reusable minibuffer and Ex commands (`:w`, `:q`, `:e`, `:s`, `:g`, ranges) |
 | 9 | **Complete** | Dired directory buffers, startup browsing, file-return quit behavior |
-| 10 | Next | Async shell runner, output buffers, path jump targets |
-| 11 | Planned | Runtime Tree-sitter language plugins and themes |
+| 10 | **Complete** | Async shell runner, read-only output buffers, path jump targets |
+| 11 | Next | Runtime Tree-sitter language plugins and themes |
 | 12 | Planned | Vim compatibility hardening, Unicode/large-file testing, profiling |
 
-Async shell execution and navigable output buffers are the next implementation checkpoint in Phase 10.
+Runtime Tree-sitter language plugins and capture-based themes are the next implementation checkpoint in Phase 11.
 
 See `AGENTS.md` for architecture constraints and `INSTRUCTIONS.md` for the development and testing workflow.

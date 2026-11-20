@@ -46,6 +46,8 @@ pub fn render(editor: &Editor, focused: bool, visible_rows: usize) -> Div {
     let focus_status = if focused { "FOCUSED" } else { "UNFOCUSED" };
     let mode = if editor.is_dired() {
         "DIRED"
+    } else if editor.is_output() {
+        "OUTPUT"
     } else {
         editor.mode().label()
     };

@@ -73,6 +73,9 @@ pub enum ExCommand {
     Delete {
         range: RangeSpec,
     },
+    Shell {
+        command: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,6 +103,16 @@ pub fn parse(input: &str) -> Result<ExCommand, ExError> {
             } => Ok(ExCommand::GoTo(*start)),
             _ => Err(ExError("Missing Ex command".to_owned())),
         };
+    }
+    if let Some(command) = rest.strip_prefix('!') {
+        require_default_range(&range)?;
+        let command = command.trim_start();
+        if command.is_empty() {
+            return Err(ExError("Missing shell command".to_owned()));
+        }
+        return Ok(ExCommand::Shell {
+            command: command.to_owned(),
+        });
     }
 
     let name_end = rest
@@ -360,6 +373,17 @@ mod tests {
             parse("1e! other.txt"),
             Err(ExError("No range allowed".to_owned()))
         );
+    }
+
+    #[test]
+    fn parses_shell_commands() {
+        assert_eq!(
+            parse("!printf hello"),
+            Ok(ExCommand::Shell {
+                command: "printf hello".to_owned()
+            })
+        );
+        assert_eq!(parse("!"), Err(ExError("Missing shell command".to_owned())));
     }
 
     #[test]

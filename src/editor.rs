@@ -12,7 +12,9 @@ use crate::{
     input::{Key, KeyValue},
     minibuffer::{Minibuffer, MinibufferKind},
     navigation::{ChangeList, JumpList},
+    output::{JumpTarget, OutputState},
     search::{self, Search},
+    shell::{ShellCompletion, ShellRequest},
     vim::{
         Command, Direction, FindMotion, InsertPlacement, Mode, Motion, Operator, OperatorCommand,
         RegisterName, RegisterStore, RegisterValue, ResolvedTarget, SelectionShape, Target,
@@ -35,9 +37,10 @@ pub struct Viewport {
     pub left_character: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EditorRequest {
     Close,
+    RunShell(ShellRequest),
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +61,8 @@ pub struct Editor {
     buffer: Buffer,
     dired: Option<DiredState>,
     dired_return: Option<DiredReturn>,
+    output: Option<OutputState>,
+    output_return: Option<PathBuf>,
     cursor: Cursor,
     viewport: Viewport,
     vim: VimEngine,
@@ -133,6 +138,8 @@ impl Editor {
             buffer,
             dired,
             dired_return: None,
+            output: None,
+            output_return: None,
             cursor: Cursor::default(),
             viewport: Viewport::default(),
             vim: VimEngine::default(),
@@ -165,14 +172,21 @@ impl Editor {
     }
 
     pub fn display_name(&self) -> String {
-        self.dired.as_ref().map_or_else(
-            || self.buffer.display_name(),
-            |dired| format!("Dired {}", dired.directory().display()),
-        )
+        if let Some(dired) = &self.dired {
+            format!("Dired {}", dired.directory().display())
+        } else if let Some(output) = &self.output {
+            output.display_name()
+        } else {
+            self.buffer.display_name()
+        }
     }
 
     pub fn is_dired(&self) -> bool {
         self.dired.is_some()
+    }
+
+    pub fn is_output(&self) -> bool {
+        self.output.is_some()
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -197,6 +211,17 @@ impl Editor {
 
     pub fn take_request(&mut self) -> Option<EditorRequest> {
         self.request.take()
+    }
+
+    pub fn finish_shell(&mut self, completion: ShellCompletion) {
+        if !self.is_read_only_special() && self.buffer.is_modified() {
+            self.message =
+                "Shell finished, but output was not opened because the buffer changed".to_owned();
+            return;
+        }
+        let (buffer, output) = OutputState::from_completion(completion);
+        self.replace_buffer(buffer, None, Some(output));
+        self.message = "Shell command finished".to_owned();
     }
 
     pub fn selection_columns(&self, line: usize) -> Option<(usize, usize)> {
@@ -277,6 +302,10 @@ impl Editor {
             self.track_completed_transaction(transactions_before);
             return;
         }
+        if self.output.is_some() && is_plain_named_key(key, "enter") {
+            self.execute_output_target();
+            return;
+        }
         if self.dired.is_some()
             && let Some(command) = dired::command_for_key(key)
         {
@@ -320,8 +349,8 @@ impl Editor {
     }
 
     fn execute_normal(&mut self, command: Command) {
-        if self.dired.is_some() && is_mutating_command(command) {
-            self.message = "Dired buffers are read-only".to_owned();
+        if self.is_read_only_special() && is_mutating_command(command) {
+            self.message = self.read_only_message().to_owned();
             self.visual_anchor = None;
             self.vim.leave_transient_mode();
             return;
@@ -1449,7 +1478,7 @@ impl Editor {
     }
 
     fn execute_ex(&mut self, command: ExCommand) {
-        if self.dired.is_some()
+        if self.is_read_only_special()
             && matches!(
                 &command,
                 ExCommand::Write { .. }
@@ -1458,7 +1487,7 @@ impl Editor {
                     | ExCommand::Delete { .. }
             )
         {
-            self.message = "Dired buffers are read-only".to_owned();
+            self.message = self.read_only_message().to_owned();
             return;
         }
         match command {
@@ -1517,6 +1546,69 @@ impl Editor {
                 }
                 Err(error) => self.message = error,
             },
+            ExCommand::Shell { command } => {
+                if !self.is_read_only_special() && self.buffer.is_modified() {
+                    self.message =
+                        "Write or discard changes before running a shell command".to_owned();
+                    return;
+                }
+                let cwd = self.working_directory();
+                self.message = format!("Running: {command}");
+                self.request = Some(EditorRequest::RunShell(ShellRequest { command, cwd }));
+            }
+        }
+    }
+
+    fn is_read_only_special(&self) -> bool {
+        self.dired.is_some() || self.output.is_some()
+    }
+
+    fn read_only_message(&self) -> &'static str {
+        if self.dired.is_some() {
+            "Dired buffers are read-only"
+        } else {
+            "Output buffers are read-only"
+        }
+    }
+
+    fn working_directory(&self) -> PathBuf {
+        if let Some(dired) = &self.dired {
+            dired.directory().to_path_buf()
+        } else if let Some(output) = &self.output {
+            output.cwd().to_path_buf()
+        } else {
+            self.buffer
+                .path()
+                .and_then(containing_directory)
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."))
+        }
+    }
+
+    fn execute_output_target(&mut self) {
+        let target = self
+            .output
+            .as_ref()
+            .and_then(|output| output.target(self.cursor.position.line).cloned());
+        let cwd = self
+            .output
+            .as_ref()
+            .map(|output| output.cwd().to_path_buf());
+        let Some(JumpTarget { path, line, column }) = target else {
+            self.message = "No path target on this line".to_owned();
+            return;
+        };
+        match Buffer::open(&path) {
+            Ok(buffer) => {
+                self.replace_buffer(buffer, None, None);
+                self.output_return = cwd;
+                self.cursor.position.line = line.min(self.buffer.len_lines().saturating_sub(1));
+                self.cursor.position.character =
+                    column.min(self.maximum_character(self.cursor.position.line));
+                self.ensure_cursor_visible();
+                self.message = format!("Edited {}", path.display());
+            }
+            Err(error) => self.message = format!("Could not open {}: {error}", path.display()),
         }
     }
 
@@ -1548,7 +1640,7 @@ impl Editor {
         } else {
             match Buffer::open(&target) {
                 Ok(buffer) => {
-                    self.replace_buffer(buffer, None);
+                    self.replace_buffer(buffer, None, None);
                     if let Some(directory) = origin_directory {
                         self.dired_return = Some(DiredReturn {
                             directory,
@@ -1572,7 +1664,7 @@ impl Editor {
         match DiredState::load(directory) {
             Ok((buffer, dired)) => {
                 let line = selected_path.and_then(|path| dired.line_for_path(path));
-                self.replace_buffer(buffer, Some(dired));
+                self.replace_buffer(buffer, Some(dired), None);
                 if let Some(line) = line {
                     self.cursor.position.line = line;
                     self.ensure_cursor_visible();
@@ -1596,6 +1688,14 @@ impl Editor {
         }
         if let Some(context) = self.dired_return.clone() {
             self.open_dired_at(&context.directory, Some(&context.selected_path));
+            return;
+        }
+        if let Some(directory) = self.output_return.clone().or_else(|| {
+            self.output
+                .as_ref()
+                .map(|output| output.cwd().to_path_buf())
+        }) {
+            self.open_dired(&directory);
             return;
         }
         let directory = self.buffer.path().and_then(containing_directory);
@@ -1651,7 +1751,7 @@ impl Editor {
         if path.is_dir() {
             match DiredState::load(&path) {
                 Ok((buffer, dired)) => {
-                    self.replace_buffer(buffer, Some(dired));
+                    self.replace_buffer(buffer, Some(dired), None);
                     self.message = format!("Dired {}", path.display());
                 }
                 Err(error) => self.message = format!("Edit failed: {error}"),
@@ -1660,17 +1760,24 @@ impl Editor {
         }
         match Buffer::open(&path) {
             Ok(buffer) => {
-                self.replace_buffer(buffer, None);
+                self.replace_buffer(buffer, None, None);
                 self.message = format!("Edited {}", path.display());
             }
             Err(error) => self.message = format!("Edit failed: {error}"),
         }
     }
 
-    fn replace_buffer(&mut self, buffer: Buffer, dired: Option<DiredState>) {
+    fn replace_buffer(
+        &mut self,
+        buffer: Buffer,
+        dired: Option<DiredState>,
+        output: Option<OutputState>,
+    ) {
         self.buffer = buffer;
         self.dired = dired;
         self.dired_return = None;
+        self.output = output;
+        self.output_return = None;
         self.cursor = Cursor::default();
         self.viewport = Viewport::default();
         self.vim = VimEngine::default();
@@ -1951,8 +2058,8 @@ impl Editor {
     }
 
     fn save(&mut self) {
-        if self.dired.is_some() {
-            self.message = "Dired buffers are read-only".to_owned();
+        if self.is_read_only_special() {
+            self.message = self.read_only_message().to_owned();
             return;
         }
         self.write_ex(None, false);
@@ -2050,6 +2157,13 @@ impl Editor {
             self.viewport.left_character = cursor_character + 1 - self.visible_columns;
         }
     }
+}
+
+fn is_plain_named_key(key: &Key, expected: &str) -> bool {
+    !key.modifiers.control
+        && !key.modifiers.alt
+        && !key.modifiers.super_key
+        && matches!(&key.value, KeyValue::Named(name) if name == expected)
 }
 
 fn containing_directory(path: &Path) -> Option<PathBuf> {
@@ -2942,6 +3056,138 @@ mod tests {
             containing_directory(Path::new("file.txt")),
             std::env::current_dir().ok()
         );
+    }
+
+    #[test]
+    fn modified_file_rejects_shell_commands() {
+        let directory = temporary_directory("shell-modified");
+        fs::create_dir(&directory).expect("create test directory");
+        let path = directory.join("notes.txt");
+        fs::write(&path, "one").expect("write file fixture");
+
+        let mut editor = Editor::open(&path);
+        type_keys(&mut editor, "A!");
+        editor.handle_key(&named("escape"));
+        execute_ex_keys(&mut editor, "!printf output");
+
+        assert_eq!(editor.take_request(), None);
+        assert_eq!(
+            editor.message(),
+            "Write or discard changes before running a shell command"
+        );
+        assert_eq!(editor.buffer.path(), Some(path.as_path()));
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one!"));
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn shell_completion_does_not_replace_a_buffer_modified_while_running() {
+        let directory = temporary_directory("shell-stale-completion");
+        fs::create_dir(&directory).expect("create test directory");
+        let path = directory.join("notes.txt");
+        fs::write(&path, "one").expect("write file fixture");
+
+        let mut editor = Editor::open(&path);
+        execute_ex_keys(&mut editor, "!printf output");
+        let request = match editor.take_request() {
+            Some(EditorRequest::RunShell(request)) => request,
+            other => panic!("expected shell request, got {other:?}"),
+        };
+        type_keys(&mut editor, "A!");
+        editor.handle_key(&named("escape"));
+
+        editor.finish_shell(ShellCompletion {
+            request,
+            result: Ok(crate::shell::ShellResult {
+                output: "output".to_owned(),
+                exit_code: Some(0),
+                success: true,
+            }),
+        });
+
+        assert!(!editor.is_output());
+        assert_eq!(editor.buffer.path(), Some(path.as_path()));
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one!"));
+        assert_eq!(
+            editor.message(),
+            "Shell finished, but output was not opened because the buffer changed"
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn shell_output_opens_targets_and_returns_to_its_working_directory() {
+        let directory = temporary_directory("shell-output");
+        fs::create_dir(&directory).expect("create test directory");
+        let path = directory.join("main.rs");
+        fs::write(&path, "one\ntwo\nthree").expect("write target fixture");
+
+        let mut editor = Editor::dired(&directory);
+        execute_ex_keys(&mut editor, "!printf main.rs:3:2");
+        let request = match editor.take_request() {
+            Some(EditorRequest::RunShell(request)) => request,
+            other => panic!("expected shell request, got {other:?}"),
+        };
+        assert_eq!(
+            request.cwd,
+            directory.canonicalize().expect("canonical directory")
+        );
+        editor.finish_shell(ShellCompletion {
+            request,
+            result: Ok(crate::shell::ShellResult {
+                output: "main.rs:3:2: error".to_owned(),
+                exit_code: Some(1),
+                success: false,
+            }),
+        });
+
+        assert!(editor.is_output());
+        assert!(editor.display_name().contains("exit 1, failed"));
+        type_keys(&mut editor, "x");
+        assert_eq!(editor.message(), "Output buffers are read-only");
+        editor.handle_key(&named("enter"));
+        assert!(!editor.is_output());
+        assert_eq!(
+            editor.cursor.position,
+            BufferPosition {
+                line: 2,
+                character: 1
+            }
+        );
+
+        execute_ex_keys(&mut editor, "q");
+        assert!(editor.is_dired());
+        assert!(
+            editor
+                .display_name()
+                .contains(directory.to_string_lossy().as_ref())
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn output_enter_without_a_target_reports_an_error() {
+        let request = ShellRequest {
+            command: "printf hello".to_owned(),
+            cwd: std::env::current_dir().expect("current directory"),
+        };
+        let mut editor = Editor::scratch();
+        editor.finish_shell(ShellCompletion {
+            request,
+            result: Ok(crate::shell::ShellResult {
+                output: "hello".to_owned(),
+                exit_code: Some(0),
+                success: true,
+            }),
+        });
+
+        editor.handle_key(&named("enter"));
+
+        assert!(editor.is_output());
+        assert_eq!(editor.message(), "No path target on this line");
     }
 
     #[test]

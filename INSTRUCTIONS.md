@@ -46,6 +46,23 @@ Parse and validate an entire Ex command before mutating the buffer. Keep GPUI-sp
 
 Dired is a read-only Rope-backed buffer with filesystem metadata held separately in `dired::DiredState`. Normal Vim navigation still flows through `VimEngine`; only Dired-specific Enter and Backspace keys are intercepted before Vim parsing. Keep filesystem loading in the Dired/editor core rather than UI rendering.
 
+Shell execution follows an asynchronous request/completion path:
+
+```text
+normalized input::Key
+→ minibuffer `:!cmd`
+→ typed ex::ExCommand::Shell
+→ EditorRequest::RunShell
+→ GPUI background executor
+→ shell::ShellCompletion
+→ read-only output::OutputState
+→ GPUI render
+```
+
+Keep `/bin/sh -c` process execution out of the UI thread and keep GPUI imports out of `editor`, `shell`, and `output`. Output targets are resolved relative to the command working directory. Before replacing the active buffer with completed output, preserve modified user data; tests must cover both launch-time and completion-time modification races. Exact stdout/stderr interleaving is not currently preserved.
+
+Dired listing text remains read-only. If writable Dired is added later, implement it as an explicit `wdired`-style filesystem-operation mode with validated rename operations, not by treating arbitrary listing edits as a normal buffer save.
+
 ## Test strategy
 
 Every new Vim feature needs tests at two levels when practical.

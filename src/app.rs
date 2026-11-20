@@ -8,6 +8,7 @@ use gpui::{
 use crate::{
     editor::{Editor, EditorRequest},
     input::Key,
+    shell::{self, ShellRequest},
     ui,
 };
 
@@ -36,9 +37,29 @@ impl EditorApp {
         if let Some(text) = self.editor.take_system_clipboard_write() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
-        let request = self.editor.take_request();
+        let request = match self.editor.take_request() {
+            Some(EditorRequest::RunShell(request)) => {
+                Self::run_shell(request, cx);
+                None
+            }
+            request => request,
+        };
         cx.notify();
         request
+    }
+
+    fn run_shell(request: ShellRequest, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let completion = cx
+                .background_executor()
+                .spawn(async move { shell::run(request) })
+                .await;
+            let _ = this.update(cx, move |app, cx| {
+                app.editor.finish_shell(completion);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -84,7 +105,7 @@ pub fn run() {
             let request = editor.update(cx, |editor, cx| {
                 editor.handle_key(Key::from(&event.keystroke), cx)
             });
-            if request == Some(EditorRequest::Close) {
+            if matches!(request, Some(EditorRequest::Close)) {
                 window.remove_window();
             }
         })

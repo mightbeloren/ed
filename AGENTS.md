@@ -33,7 +33,7 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 
 ## Current phase
 
-Phase 9 is complete:
+Phase 10 is complete:
 
 - Rope-backed file buffer, atomic save, viewport, cursor, and relative line numbers
 - Normal and Insert modes
@@ -61,8 +61,13 @@ Phase 9 is complete:
 - Read-only Rope-backed Dired buffers with ls-style rows
 - Current-directory startup, keyboard entry opening, and parent navigation
 - File quit commands return to Dired; quitting Dired closes the window
+- Asynchronous `:!cmd` execution through `/bin/sh -c`
+- Read-only shell output buffers with exit status
+- Existing `path`, `path:line`, and `path:line:column` output jump targets
+- Output and opened-target quit behavior returns to the command working-directory Dired
+- Modified-buffer protection before shell launch and when asynchronous completion arrives
 
-Phase 10 is next: async shell execution and navigable output buffers. See `README.md` for the complete roadmap.
+Phase 11 is next: runtime Tree-sitter language plugins and capture-based themes. See `README.md` for the complete roadmap.
 
 ## Phase discipline
 
