@@ -49,6 +49,7 @@ pub enum Command {
     StartSearch {
         direction: Direction,
     },
+    StartEx,
     RepeatSearch {
         reverse: bool,
         count: u32,

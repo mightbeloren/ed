@@ -1,10 +1,17 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+
+use regex::{Regex, RegexBuilder};
 
 use crate::{
     buffer::{Buffer, BufferPosition, CharOffset},
+    ex::{self, Address, ExCommand, GlobalAction, RangeSeparator, RangeSpec, Substitute},
     input::{Key, KeyValue},
+    minibuffer::{Minibuffer, MinibufferKind},
     navigation::{ChangeList, JumpList},
-    search::{self, Search, SearchPrompt},
+    search::{self, Search},
     vim::{
         Command, Direction, FindMotion, InsertPlacement, Mode, Motion, Operator, OperatorCommand,
         RegisterName, RegisterStore, RegisterValue, ResolvedTarget, SelectionShape, Target,
@@ -25,6 +32,11 @@ pub struct Cursor {
 pub struct Viewport {
     pub top_line: usize,
     pub left_character: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorRequest {
+    Close,
 }
 
 #[derive(Clone, Debug)]
@@ -56,8 +68,10 @@ pub struct Editor {
     change_list: ChangeList,
     jump_list: JumpList,
     marks: HashMap<char, BufferPosition>,
-    search_prompt: Option<SearchPrompt>,
+    minibuffer: Option<Minibuffer>,
     last_search: Option<Search>,
+    last_ex_pattern: Option<String>,
+    request: Option<EditorRequest>,
     replaying: bool,
 }
 
@@ -99,8 +113,10 @@ impl Editor {
             change_list: ChangeList::default(),
             jump_list: JumpList::default(),
             marks: HashMap::new(),
-            search_prompt: None,
+            minibuffer: None,
             last_search: None,
+            last_ex_pattern: None,
+            request: None,
             replaying: false,
         }
     }
@@ -126,7 +142,11 @@ impl Editor {
     }
 
     pub fn prompt_text(&self) -> Option<String> {
-        self.search_prompt.as_ref().map(SearchPrompt::display)
+        self.minibuffer.as_ref().map(Minibuffer::display)
+    }
+
+    pub fn take_request(&mut self) -> Option<EditorRequest> {
+        self.request.take()
     }
 
     pub fn selection_columns(&self, line: usize) -> Option<(usize, usize)> {
@@ -187,7 +207,7 @@ impl Editor {
     pub fn handle_key(&mut self, key: &Key) {
         if !self.replaying
             && self.recording_macro.is_some()
-            && self.search_prompt.is_none()
+            && self.minibuffer.is_none()
             && self.vim.mode() == Mode::Normal
             && matches!(&key.value, KeyValue::Character(value) if value == "q")
         {
@@ -201,8 +221,10 @@ impl Editor {
         {
             keys.push(key.clone());
         }
-        if self.search_prompt.is_some() {
-            self.handle_search_prompt_key(key);
+        if self.minibuffer.is_some() {
+            let transactions_before = self.buffer.completed_transaction_count();
+            self.handle_minibuffer_key(key);
+            self.track_completed_transaction(transactions_before);
             return;
         }
         if !self.replaying && (!self.pending_change_keys.is_empty() || starts_change(key)) {
@@ -232,18 +254,8 @@ impl Editor {
             Mode::Replace => self.handle_replace_key(key),
         }
 
-        if self.buffer.completed_transaction_count() > transactions_before {
-            if let Some(position) = self
-                .buffer
-                .last_completed_transaction_start()
-                .and_then(|offset| self.buffer.offset_to_position(offset).ok())
-            {
-                self.change_list.record(position);
-            }
-            if !self.replaying && !self.pending_change_keys.is_empty() {
-                self.last_change_keys = std::mem::take(&mut self.pending_change_keys);
-            }
-        } else if !self.replaying
+        self.track_completed_transaction(transactions_before);
+        if !self.replaying
             && matches!(&key.value, KeyValue::Named(name) if name == "escape")
             && self.vim.mode() == Mode::Normal
         {
@@ -287,6 +299,7 @@ impl Editor {
             }
             Command::RepeatChange { count } => self.repeat_change(count),
             Command::StartSearch { direction } => self.start_search(direction),
+            Command::StartEx => self.start_ex(),
             Command::RepeatSearch { reverse, count } => self.repeat_search(reverse, count),
             Command::SearchWord { direction, count } => self.search_word(direction, count),
             Command::SetMark { mark } => {
@@ -1187,53 +1200,81 @@ impl Editor {
     }
 
     fn start_search(&mut self, direction: Direction) {
-        self.search_prompt = Some(SearchPrompt {
-            direction,
-            query: String::new(),
-        });
+        self.minibuffer = Some(Minibuffer::search(direction));
         self.message.clear();
     }
 
-    fn handle_search_prompt_key(&mut self, key: &Key) {
+    fn start_ex(&mut self) {
+        let initial = self
+            .visual_anchor
+            .map_or_else(String::new, |_| "'<,'>".to_owned());
+        self.minibuffer = Some(Minibuffer::ex(initial));
+        self.message.clear();
+    }
+
+    fn handle_minibuffer_key(&mut self, key: &Key) {
         match &key.value {
             KeyValue::Named(name) if name == "escape" => {
-                self.search_prompt = None;
+                self.minibuffer = None;
                 self.message.clear();
             }
             KeyValue::Named(name) if name == "backspace" => {
-                if let Some(prompt) = &mut self.search_prompt {
-                    prompt.query.pop();
+                if let Some(minibuffer) = &mut self.minibuffer {
+                    minibuffer.text.pop();
                 }
             }
             KeyValue::Named(name) if name == "enter" => {
-                let Some(prompt) = self.search_prompt.take() else {
+                let Some(minibuffer) = self.minibuffer.take() else {
                     return;
                 };
-                let search = if prompt.query.is_empty() {
-                    self.last_search.clone().map(|mut search| {
-                        search.direction = prompt.direction;
-                        search
-                    })
-                } else {
-                    Some(Search {
-                        query: prompt.query,
-                        direction: prompt.direction,
-                        whole_word: false,
-                    })
-                };
-                if let Some(search) = search {
-                    self.last_search = Some(search.clone());
-                    self.execute_search(search, 1);
+                match minibuffer.kind {
+                    MinibufferKind::Search(direction) => {
+                        self.submit_search(minibuffer.text, direction)
+                    }
+                    MinibufferKind::Ex => self.submit_ex(&minibuffer.text),
+                }
+            }
+            KeyValue::Named(name) if name == "u" && key.modifiers.control => {
+                if let Some(minibuffer) = &mut self.minibuffer {
+                    minibuffer.text.clear();
                 }
             }
             KeyValue::Character(text)
                 if !key.modifiers.control && !key.modifiers.alt && !key.modifiers.super_key =>
             {
-                if let Some(prompt) = &mut self.search_prompt {
-                    prompt.query.push_str(text);
+                if let Some(minibuffer) = &mut self.minibuffer {
+                    minibuffer.text.push_str(text);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn submit_search(&mut self, query: String, direction: Direction) {
+        let search = if query.is_empty() {
+            self.last_search.clone().map(|mut search| {
+                search.direction = direction;
+                search
+            })
+        } else {
+            Some(Search {
+                query,
+                direction,
+                whole_word: false,
+            })
+        };
+        if let Some(search) = search {
+            self.last_search = Some(search.clone());
+            self.execute_search(search, 1);
+        } else {
+            self.message = "No previous search".to_owned();
+        }
+    }
+
+    fn submit_ex(&mut self, input: &str) {
+        match ex::parse(input) {
+            Ok(command) => self.execute_ex(command),
+            Err(error) => self.message = error.to_string(),
         }
     }
 
@@ -1345,11 +1386,406 @@ impl Editor {
             .min(self.maximum_character(line))
     }
 
-    fn save(&mut self) {
-        self.message = match self.buffer.save() {
-            Ok(()) => format!("Wrote {}", self.buffer.display_name()),
-            Err(error) => format!("Write failed: {error}"),
+    fn execute_ex(&mut self, command: ExCommand) {
+        match command {
+            ExCommand::GoTo(address) => match self.resolve_address(address) {
+                Ok(line) => {
+                    let origin = self.cursor.position;
+                    let destination = BufferPosition {
+                        line,
+                        character: self.first_non_blank(line),
+                    };
+                    self.jump_list.record(origin, destination);
+                    self.move_to_position(destination);
+                    self.leave_visual_after_ex();
+                }
+                Err(error) => self.message = error,
+            },
+            ExCommand::Write {
+                range,
+                path,
+                force,
+                quit,
+            } => {
+                if !matches!(range, RangeSpec::Default | RangeSpec::Whole) {
+                    self.message = "Ranged :write is not supported".to_owned();
+                    return;
+                }
+                let saved = self.write_ex(path.as_deref(), force);
+                if saved && quit {
+                    self.request = Some(EditorRequest::Close);
+                }
+            }
+            ExCommand::Quit { force } => {
+                if self.buffer.is_modified() && !force {
+                    self.message = "No write since last change (add ! to override)".to_owned();
+                } else {
+                    self.request = Some(EditorRequest::Close);
+                }
+            }
+            ExCommand::Edit { path, force } => self.edit_ex(path.as_deref(), force),
+            ExCommand::Substitute {
+                range,
+                substitution,
+            } => match self.resolve_range(&range, false) {
+                Ok((start, end)) => {
+                    let lines: Vec<usize> = (start..=end).collect();
+                    self.apply_substitution(&lines, &substitution);
+                    self.leave_visual_after_ex();
+                }
+                Err(error) => self.message = error,
+            },
+            ExCommand::Global {
+                range,
+                pattern,
+                case_insensitive,
+                invert,
+                action,
+            } => self.execute_global(&range, &pattern, case_insensitive, invert, action),
+            ExCommand::Delete { range } => match self.resolve_range(&range, false) {
+                Ok((start, end)) => {
+                    self.delete_lines(&(start..=end).collect::<Vec<_>>());
+                    self.leave_visual_after_ex();
+                }
+                Err(error) => self.message = error,
+            },
+        }
+    }
+
+    fn write_ex(&mut self, path: Option<&str>, force: bool) -> bool {
+        let mut written_name = self.buffer.display_name();
+        let result = if let Some(path) = path {
+            let path = PathBuf::from(path);
+            let different_file = self.buffer.path().is_none_or(|current| current != path);
+            if different_file && path.exists() && !force {
+                self.message = format!("File exists: {} (add ! to override)", path.display());
+                return false;
+            }
+            written_name = path.display().to_string();
+            if self.buffer.path().is_some() && different_file {
+                self.buffer.write_to(&path)
+            } else {
+                self.buffer.save_as(path)
+            }
+        } else {
+            self.buffer.save()
         };
+        match result {
+            Ok(()) => {
+                self.message = format!("Wrote {written_name}");
+                true
+            }
+            Err(error) => {
+                self.message = format!("Write failed: {error}");
+                false
+            }
+        }
+    }
+
+    fn edit_ex(&mut self, path: Option<&str>, force: bool) {
+        if self.buffer.is_modified() && !force {
+            self.message = "No write since last change (add ! to override)".to_owned();
+            return;
+        }
+        let path = path
+            .map(PathBuf::from)
+            .or_else(|| self.buffer.path().map(Path::to_path_buf));
+        let Some(path) = path else {
+            self.message = "No file name".to_owned();
+            return;
+        };
+        match Buffer::open(&path) {
+            Ok(buffer) => {
+                self.replace_buffer(buffer);
+                self.message = format!("Edited {}", path.display());
+            }
+            Err(error) => self.message = format!("Edit failed: {error}"),
+        }
+    }
+
+    fn replace_buffer(&mut self, buffer: Buffer) {
+        self.buffer = buffer;
+        self.cursor = Cursor::default();
+        self.viewport = Viewport::default();
+        self.vim = VimEngine::default();
+        self.last_find = None;
+        self.visual_anchor = None;
+        self.block_insert = None;
+        self.insert_session_changed = false;
+        self.pending_change_keys.clear();
+        self.last_change_keys.clear();
+        self.change_list = ChangeList::default();
+        self.jump_list = JumpList::default();
+        self.marks.clear();
+        self.last_search = None;
+        self.last_ex_pattern = None;
+    }
+
+    fn resolve_range(
+        &self,
+        range: &RangeSpec,
+        default_whole: bool,
+    ) -> Result<(usize, usize), String> {
+        let last = self.buffer.logical_len_lines().saturating_sub(1);
+        match range {
+            RangeSpec::Default if default_whole => Ok((0, last)),
+            RangeSpec::Default => Ok((self.cursor.position.line, self.cursor.position.line)),
+            RangeSpec::Whole => Ok((0, last)),
+            RangeSpec::Addresses {
+                start,
+                end,
+                separator,
+            } => {
+                let original_current = self.cursor.position.line;
+                let start = self.resolve_address_at(*start, original_current)?;
+                let second_current = if *separator == Some(RangeSeparator::Semicolon) {
+                    start
+                } else {
+                    original_current
+                };
+                let end = end.map_or(Ok(start), |address| {
+                    self.resolve_address_at(address, second_current)
+                })?;
+                if start > end {
+                    Err("Backward range".to_owned())
+                } else {
+                    Ok((start, end))
+                }
+            }
+        }
+    }
+
+    fn resolve_address(&self, address: Address) -> Result<usize, String> {
+        self.resolve_address_at(address, self.cursor.position.line)
+    }
+
+    fn resolve_address_at(&self, address: Address, current: usize) -> Result<usize, String> {
+        let last = self.buffer.logical_len_lines().saturating_sub(1);
+        match address {
+            Address::Current => Ok(current.min(last)),
+            Address::Last => Ok(last),
+            Address::Line(line) if line <= self.buffer.logical_len_lines() => Ok(line - 1),
+            Address::Line(line) => Err(format!("Line number out of range: {line}")),
+            Address::Mark(mark) => self
+                .marks
+                .get(&mark)
+                .map(|position| position.line.min(last))
+                .ok_or_else(|| format!("Mark not set: {mark}")),
+            Address::VisualStart => self
+                .visual_line_range()
+                .map(|(start, _)| start)
+                .ok_or_else(|| "No Visual selection".to_owned()),
+            Address::VisualEnd => self
+                .visual_line_range()
+                .map(|(_, end)| end)
+                .ok_or_else(|| "No Visual selection".to_owned()),
+        }
+    }
+
+    fn visual_line_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.visual_anchor?;
+        Some((
+            anchor.line.min(self.cursor.position.line),
+            anchor.line.max(self.cursor.position.line),
+        ))
+    }
+
+    fn execute_global(
+        &mut self,
+        range: &RangeSpec,
+        pattern: &str,
+        case_insensitive: bool,
+        invert: bool,
+        action: GlobalAction,
+    ) {
+        let (start, end) = match self.resolve_range(range, true) {
+            Ok(range) => range,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        let (regex, _) = match self.compile_ex_pattern(pattern, case_insensitive) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        let lines: Vec<usize> = (start..=end)
+            .filter(|line| {
+                let matches = self
+                    .buffer
+                    .line_text(*line)
+                    .is_some_and(|text| regex.is_match(&text));
+                matches != invert
+            })
+            .collect();
+        match action {
+            GlobalAction::Count => {
+                self.message = format!("{} matching lines", lines.len());
+            }
+            GlobalAction::Delete => self.delete_lines(&lines),
+            GlobalAction::Substitute(substitution) => {
+                self.apply_substitution(&lines, &substitution)
+            }
+        }
+        self.leave_visual_after_ex();
+    }
+
+    fn apply_substitution(&mut self, lines: &[usize], substitution: &Substitute) {
+        let (regex, pattern) =
+            match self.compile_ex_pattern(&substitution.pattern, substitution.case_insensitive) {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    self.message = error;
+                    return;
+                }
+            };
+        let mut edits = Vec::new();
+        let mut substitutions = 0;
+        for &line in lines {
+            let Some(text) = self.buffer.line_text(line) else {
+                continue;
+            };
+            let count = if substitution.global {
+                regex.find_iter(&text).count()
+            } else {
+                usize::from(regex.is_match(&text))
+            };
+            if count == 0 {
+                continue;
+            }
+            let replacement = if substitution.global {
+                regex.replace_all(&text, substitution.replacement.as_str())
+            } else {
+                regex.replace(&text, substitution.replacement.as_str())
+            };
+            let Some(start) = self.buffer.line_start_offset(line) else {
+                continue;
+            };
+            edits.push((
+                start,
+                CharOffset(start.0 + text.chars().count()),
+                replacement.into_owned(),
+            ));
+            substitutions += count;
+        }
+        if edits.is_empty() {
+            self.message = format!("Pattern not found: {pattern}");
+            return;
+        }
+        self.buffer.begin_transaction();
+        for (start, end, replacement) in edits.into_iter().rev() {
+            let _ = self.buffer.remove(start, end);
+            let _ = self.buffer.insert(start, &replacement);
+        }
+        self.buffer.commit_transaction();
+        self.message = format!("{substitutions} substitutions");
+    }
+
+    fn compile_ex_pattern(
+        &mut self,
+        pattern: &str,
+        case_insensitive: bool,
+    ) -> Result<(Regex, String), String> {
+        let pattern = if pattern.is_empty() {
+            self.last_ex_pattern
+                .clone()
+                .or_else(|| {
+                    self.last_search
+                        .as_ref()
+                        .map(|search| regex::escape(&search.query))
+                })
+                .ok_or_else(|| "No previous pattern".to_owned())?
+        } else {
+            pattern.to_owned()
+        };
+        let regex = compile_regex(&pattern, case_insensitive)?;
+        self.last_ex_pattern = Some(pattern.clone());
+        Ok((regex, pattern))
+    }
+
+    fn delete_lines(&mut self, lines: &[usize]) {
+        if lines.is_empty() {
+            self.message = "No matching lines".to_owned();
+            return;
+        }
+        let mut deleted_text = lines
+            .iter()
+            .filter_map(|line| self.buffer.line_text(*line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        deleted_text.push('\n');
+        self.registers.record_delete(
+            RegisterName::Unnamed,
+            RegisterValue {
+                text: deleted_text,
+                shape: SelectionShape::LineWise,
+            },
+        );
+        self.buffer.begin_transaction();
+        for &line in lines.iter().rev() {
+            if line >= self.buffer.len_lines() {
+                continue;
+            }
+            let Some((start, end)) = self.line_delete_bounds(line) else {
+                continue;
+            };
+            let _ = self.buffer.remove(start, end);
+        }
+        self.buffer.commit_transaction();
+        self.cursor.position.line = lines[0].min(self.buffer.len_lines().saturating_sub(1));
+        self.cursor.position.character = 0;
+        self.clamp_cursor_to_mode();
+        self.ensure_cursor_visible();
+        self.message = format!("{} lines deleted", lines.len());
+    }
+
+    fn line_delete_bounds(&self, line: usize) -> Option<(CharOffset, CharOffset)> {
+        let start = self.buffer.line_start_offset(line)?;
+        if line + 1 < self.buffer.len_lines() {
+            return Some((start, self.buffer.line_start_offset(line + 1)?));
+        }
+        if line == 0 {
+            return Some((start, CharOffset(self.buffer.len_chars())));
+        }
+        let mut adjusted = start.0;
+        if adjusted > 0 && self.buffer.char_at(CharOffset(adjusted - 1)) == Some('\n') {
+            adjusted -= 1;
+            if adjusted > 0 && self.buffer.char_at(CharOffset(adjusted - 1)) == Some('\r') {
+                adjusted -= 1;
+            }
+        }
+        Some((CharOffset(adjusted), CharOffset(self.buffer.len_chars())))
+    }
+
+    fn leave_visual_after_ex(&mut self) {
+        if self.visual_anchor.is_some() {
+            self.visual_anchor = None;
+            self.vim.leave_transient_mode();
+            self.clamp_cursor_to_mode();
+        }
+    }
+
+    fn track_completed_transaction(&mut self, transactions_before: usize) {
+        if self.buffer.completed_transaction_count() <= transactions_before {
+            return;
+        }
+        if let Some(position) = self
+            .buffer
+            .last_completed_transaction_start()
+            .and_then(|offset| self.buffer.offset_to_position(offset).ok())
+        {
+            self.change_list.record(position);
+        }
+        if !self.replaying && !self.pending_change_keys.is_empty() {
+            self.last_change_keys = std::mem::take(&mut self.pending_change_keys);
+        }
+    }
+
+    fn save(&mut self) {
+        self.write_ex(None, false);
     }
 
     fn move_vertical(&mut self, delta: isize) {
@@ -1446,6 +1882,13 @@ impl Editor {
     }
 }
 
+fn compile_regex(pattern: &str, case_insensitive: bool) -> Result<Regex, String> {
+    RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
+        .map_err(|error| format!("Invalid pattern: {error}"))
+}
+
 fn opposite(direction: Direction) -> Direction {
     match direction {
         Direction::Forward => Direction::Backward,
@@ -1491,6 +1934,8 @@ fn updated_brace_depth(mut depth: usize, text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, process};
+
     use crate::input::{Key, KeyValue, Modifiers};
 
     use super::*;
@@ -2012,6 +2457,212 @@ mod tests {
     }
 
     #[test]
+    fn ex_substitution_respects_ranges_and_is_one_undo_step() {
+        let mut editor = editor_with_text("cat cat\ncat\ndog");
+
+        execute_ex_keys(&mut editor, "1,2s/cat/fox/g");
+
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("fox fox"));
+        assert_eq!(editor.buffer.line_text(1).as_deref(), Some("fox"));
+        assert_eq!(editor.buffer.line_text(2).as_deref(), Some("dog"));
+        assert_eq!(editor.buffer.completed_transaction_count(), 1);
+        assert_eq!(editor.message(), "3 substitutions");
+
+        type_keys(&mut editor, "u");
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("cat cat"));
+        assert_eq!(editor.buffer.line_text(1).as_deref(), Some("cat"));
+    }
+
+    #[test]
+    fn semicolon_ranges_resolve_dot_from_the_first_address() {
+        let mut editor = editor_with_text("one\ntwo\nthree");
+        type_keys(&mut editor, "G");
+
+        execute_ex_keys(&mut editor, "1;.d");
+
+        assert_eq!(
+            editor
+                .buffer
+                .text(CharOffset(0), CharOffset(editor.buffer.len_chars()))
+                .as_deref(),
+            Some("two\nthree")
+        );
+    }
+
+    #[test]
+    fn empty_ex_patterns_reuse_history_or_fail_without_mutating() {
+        let mut missing = editor_with_text("cat");
+        execute_ex_keys(&mut missing, "s//dog/g");
+        assert_eq!(missing.buffer.line_text(0).as_deref(), Some("cat"));
+        assert_eq!(missing.message(), "No previous pattern");
+        assert_eq!(missing.buffer.completed_transaction_count(), 0);
+
+        let mut repeated = editor_with_text("cat cat");
+        execute_ex_keys(&mut repeated, "s/cat/dog/");
+        execute_ex_keys(&mut repeated, "s//fox/");
+        assert_eq!(repeated.buffer.line_text(0).as_deref(), Some("dog fox"));
+    }
+
+    #[test]
+    fn visual_ex_range_is_prefilled_and_applied() {
+        let mut editor = editor_with_text("cat\ncat\ncat");
+
+        type_keys(&mut editor, "Vj:");
+        assert_eq!(editor.prompt_text().as_deref(), Some(":'<,'>"));
+        type_keys(&mut editor, "s/cat/dog/");
+        editor.handle_key(&named("enter"));
+
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("dog"));
+        assert_eq!(editor.buffer.line_text(1).as_deref(), Some("dog"));
+        assert_eq!(editor.buffer.line_text(2).as_deref(), Some("cat"));
+        assert_eq!(editor.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn global_commands_delete_and_substitute_matching_lines() {
+        let mut deletion = editor_with_text("keep\nerror one\nkeep\nerror two");
+        execute_ex_keys(&mut deletion, "g/^error/d");
+        assert_eq!(
+            deletion
+                .buffer
+                .text(CharOffset(0), CharOffset(deletion.buffer.len_chars()))
+                .as_deref(),
+            Some("keep\nkeep")
+        );
+        assert_eq!(deletion.buffer.completed_transaction_count(), 1);
+
+        let mut substitution = editor_with_text("keep\nerror one\nerror two");
+        execute_ex_keys(&mut substitution, "g/^error/s/error/fixed/");
+        assert_eq!(
+            substitution.buffer.line_text(1).as_deref(),
+            Some("fixed one")
+        );
+        assert_eq!(
+            substitution.buffer.line_text(2).as_deref(),
+            Some("fixed two")
+        );
+    }
+
+    #[test]
+    fn ex_delete_uses_logical_lines_and_updates_registers() {
+        let mut lf = editor_with_text("one\ntwo\n");
+        execute_ex_keys(&mut lf, "$d");
+        assert_eq!(
+            lf.buffer
+                .text(CharOffset(0), CharOffset(lf.buffer.len_chars()))
+                .as_deref(),
+            Some("one\n")
+        );
+        assert_eq!(
+            lf.registers.unnamed(),
+            Some(&RegisterValue {
+                text: "two\n".to_owned(),
+                shape: SelectionShape::LineWise
+            })
+        );
+
+        let mut crlf = editor_with_text("one\r\ntwo\r\n");
+        execute_ex_keys(&mut crlf, "$d");
+        assert_eq!(
+            crlf.buffer
+                .text(CharOffset(0), CharOffset(crlf.buffer.len_chars()))
+                .as_deref(),
+            Some("one\r\n")
+        );
+    }
+
+    #[test]
+    fn writing_an_alternate_path_does_not_retarget_a_named_buffer() {
+        let directory = temporary_directory("alternate-write");
+        fs::create_dir(&directory).expect("create test directory");
+        let current = directory.join("current.txt");
+        let alternate = directory.join("alternate.txt");
+        fs::write(&current, "one").expect("write current fixture");
+        fs::write(&alternate, "old").expect("write alternate fixture");
+
+        let mut editor = Editor::open(&current);
+        type_keys(&mut editor, "A!");
+        editor.handle_key(&named("escape"));
+        execute_ex_keys(&mut editor, &format!("w! {}", alternate.display()));
+
+        assert_eq!(
+            fs::read_to_string(&alternate).expect("read alternate"),
+            "one!"
+        );
+        assert_eq!(editor.buffer.path(), Some(current.as_path()));
+        assert!(editor.buffer.is_modified());
+
+        execute_ex_keys(&mut editor, "w");
+        assert_eq!(fs::read_to_string(&current).expect("read current"), "one!");
+        assert!(!editor.buffer.is_modified());
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn ranged_lifecycle_commands_do_not_close_or_replace_the_buffer() {
+        let mut editor = editor_with_text("one");
+
+        execute_ex_keys(&mut editor, "%q!");
+        assert_eq!(editor.take_request(), None);
+        assert_eq!(editor.message(), "No range allowed");
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn ex_write_edit_and_quit_protect_user_changes() {
+        let directory = temporary_directory("ex-files");
+        fs::create_dir(&directory).expect("create test directory");
+        let first = directory.join("first.txt");
+        let second = directory.join("second.txt");
+        fs::write(&second, "second").expect("write second fixture");
+
+        let mut editor = Editor::scratch();
+        type_keys(&mut editor, "ihello");
+        editor.handle_key(&named("escape"));
+        execute_ex_keys(&mut editor, &format!("w {}", first.display()));
+        assert_eq!(
+            fs::read_to_string(&first).expect("read saved file"),
+            "hello"
+        );
+        assert!(!editor.buffer.is_modified());
+
+        type_keys(&mut editor, "A!");
+        editor.handle_key(&named("escape"));
+        execute_ex_keys(&mut editor, &format!("e {}", second.display()));
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("hello!"));
+        assert!(editor.message().contains("No write since last change"));
+
+        execute_ex_keys(&mut editor, &format!("e! {}", second.display()));
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("second"));
+        assert!(!editor.buffer.is_modified());
+
+        type_keys(&mut editor, "A!");
+        editor.handle_key(&named("escape"));
+        execute_ex_keys(&mut editor, "q");
+        assert_eq!(editor.take_request(), None);
+        execute_ex_keys(&mut editor, "q!");
+        assert_eq!(editor.take_request(), Some(EditorRequest::Close));
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn ex_line_address_jumps_to_first_non_blank() {
+        let mut editor = editor_with_text("one\n  two\nthree");
+
+        execute_ex_keys(&mut editor, "2");
+
+        assert_eq!(
+            editor.cursor.position,
+            BufferPosition {
+                line: 1,
+                character: 2
+            }
+        );
+    }
+
+    #[test]
     fn search_prompt_repeats_and_reverses_wrapping_searches() {
         let mut editor = editor_with_text("one two one three one");
 
@@ -2182,6 +2833,23 @@ mod tests {
         let mut operator = editor_with_text("one two three");
         type_keys(&mut operator, "dw.");
         assert_eq!(operator.buffer.line_text(0).as_deref(), Some("three"));
+    }
+
+    fn execute_ex_keys(editor: &mut Editor, command: &str) {
+        type_keys(editor, ":");
+        type_keys(editor, command);
+        editor.handle_key(&named("enter"));
+    }
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ed-{label}-{}-{}",
+            process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time after Unix epoch")
+                .as_nanos()
+        ))
     }
 
     fn editor_with_text(text: &str) -> Editor {

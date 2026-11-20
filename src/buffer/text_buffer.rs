@@ -86,6 +86,10 @@ impl Buffer {
         })
     }
 
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
     pub fn display_name(&self) -> String {
         self.path
             .as_ref()
@@ -109,6 +113,15 @@ impl Buffer {
 
     pub fn len_lines(&self) -> usize {
         self.text.len_lines()
+    }
+
+    pub fn logical_len_lines(&self) -> usize {
+        let lines = self.text.len_lines();
+        if lines > 1 && self.text.line(lines - 1).len_chars() == 0 {
+            lines - 1
+        } else {
+            lines
+        }
     }
 
     pub fn line_start_offset(&self, line: usize) -> Option<CharOffset> {
@@ -304,6 +317,25 @@ impl Buffer {
         } else {
             self.untracked_modified = true;
         }
+    }
+
+    pub fn write_to(&self, path: impl AsRef<Path>) -> Result<(), BufferError> {
+        let path = path.as_ref();
+        let temporary_path = temporary_path_for(path, self.revision);
+        let result = self.write_atomic(path, &temporary_path);
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary_path);
+        }
+        result
+    }
+
+    pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), BufferError> {
+        let previous_path = self.path.replace(path.as_ref().to_path_buf());
+        if let Err(error) = self.save() {
+            self.path = previous_path;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn save(&mut self) -> Result<(), BufferError> {

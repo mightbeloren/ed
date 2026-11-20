@@ -2,12 +2,13 @@
 
 A Vim-first, keyboard-only text editor for Linux, built in Rust with GPUI.
 
-The project is implemented one validated, committed phase at a time. **Phase 7 is complete.**
+The project is implemented one validated, committed phase at a time. **Phase 8 is complete.**
 
 ## Dependency baseline
 
 - GPUI `0.2.2` (exact pin)
 - Ropey `1.6.1` (exact pin)
+- Regex `1.13.2` (exact pin)
 
 All UI text uses JetBrains Mono. The font must be installed on the system.
 
@@ -76,6 +77,21 @@ Insert, Replace, change, and block-insert sessions are grouped into logical edit
 - Jump list traversal with counted `Ctrl-o` / `Ctrl-i`
 - Change list traversal with counted `g;` / `g,`
 
+### Minibuffer and Ex commands
+
+- Reusable bottom minibuffer for search and `:` commands
+- Prompt editing with Backspace, `Ctrl-u`, Enter, and Escape
+- `:w`, `:w!`, `:wq`, and writing to a path
+- `:q` / `:q!` with modified-buffer protection
+- `:e` / `:e!` with safe failure behavior and reload support
+- Line jumps such as `:42`
+- Ranges using line numbers, `.`, `$`, `%`, lowercase marks, and Visual `'<,'>` addresses
+- Transactional `:s` with `g` and `i` flags
+- `:g` / `:v` matching with count/print, delete, or nested substitution actions
+- Ranged `:delete`
+
+Ex matching currently uses Rust regex syntax rather than Vim's distinct regex dialect. Ranged writes and the broader Vim Ex grammar remain compatibility-hardening work.
+
 ## UI
 
 - JetBrains Mono throughout
@@ -99,12 +115,12 @@ There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven 
 | 5 | **Complete** | Text objects, full register families, clipboard bridge, character/line/block paste |
 | 6 | **Complete** | Branching undo tree, macros, and dot-repeat |
 | 7 | **Complete** | Search (`/`, `?`, `n`, `N`, `*`, `#`), local marks, jump/change lists |
-| 8 | Next | Minibuffer and Ex commands (`:w`, `:q`, `:e`, `:s`, `:g`, ranges) |
-| 9 | Planned | Dired directory buffers |
+| 8 | **Complete** | Reusable minibuffer and Ex commands (`:w`, `:q`, `:e`, `:s`, `:g`, ranges) |
+| 9 | Next | Dired directory buffers |
 | 10 | Planned | Async shell runner, output buffers, path jump targets |
 | 11 | Planned | Runtime Tree-sitter language plugins and themes |
 | 12 | Planned | Vim compatibility hardening, Unicode/large-file testing, profiling |
 
-The reusable Ex/minibuffer command line and `:` commands arrive in Phase 8.
+Dired directory buffers are the next implementation checkpoint in Phase 9.
 
 See `AGENTS.md` for architecture constraints and `INSTRUCTIONS.md` for the development and testing workflow.

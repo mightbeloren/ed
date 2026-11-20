@@ -136,6 +136,7 @@ impl VimEngine {
             Some(
                 command @ (Command::Move { .. }
                 | Command::StartSearch { .. }
+                | Command::StartEx
                 | Command::RepeatSearch { .. }
                 | Command::SearchWord { .. }
                 | Command::JumpToMark { .. }

@@ -25,14 +25,15 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 - Vim keys are normalized into `input::Key`, parsed into semantic `vim::Command` values, then executed by `Editor`.
 - Operator-plus-motion behavior must remain generic. Do not add separate implementations for combinations such as `dw`, `db`, or `d$`.
 - Motions resolve through `vim::target`; operators consume `ResolvedTarget` values.
-- Keep buffer, Vim, syntax, Dired, minibuffer/shell, UI, and plugin loading as separate modules.
+- Keep buffer, Vim, Ex parsing, syntax, Dired, minibuffer/shell, UI, and plugin loading as separate modules.
+- Ex input is parsed into typed `ex::ExCommand` values before execution; parse and validate before mutating the buffer.
 - Treat byte offsets, Rope character offsets, buffer line/character positions, and display columns as distinct concepts.
 - The current editor intentionally has no soft wrapping.
 - The cursor line uses its absolute 1-based line number; other visible lines use relative numbers.
 
 ## Current phase
 
-Phase 7 is complete:
+Phase 8 is complete:
 
 - Rope-backed file buffer, atomic save, viewport, cursor, and relative line numbers
 - Normal and Insert modes
@@ -53,8 +54,12 @@ Phase 7 is complete:
 - Wrapping literal search through the bottom prompt, including `n`, `N`, `*`, and `#`
 - Local lowercase marks with exact and linewise jumps
 - Counted jump-list and change-list traversal
+- Reusable search/Ex minibuffer
+- Typed Ex parser with line, mark, whole-buffer, and Visual ranges
+- Safe `:w`, `:q`, and `:e` file lifecycle commands
+- Transactional regex `:s`, `:g`, `:v`, and ranged delete commands
 
-Phase 8 is next: the reusable minibuffer and Ex commands. See `README.md` for the complete roadmap.
+Phase 9 is next: Dired directory buffers. See `README.md` for the complete roadmap.
 
 ## Phase discipline
 

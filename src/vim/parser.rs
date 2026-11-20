@@ -304,6 +304,10 @@ impl NormalParser {
             '.' => Some(self.repeat_change()),
             '/' => Some(self.start_search(Direction::Forward)),
             '?' => Some(self.start_search(Direction::Backward)),
+            ':' => {
+                self.reset();
+                Some(Command::StartEx)
+            }
             'n' => Some(self.repeat_search(false)),
             'N' => Some(self.repeat_search(true)),
             '*' => Some(self.search_word(Direction::Forward)),
@@ -723,6 +727,7 @@ mod tests {
 
     #[test]
     fn parses_search_mark_and_change_list_commands() {
+        assert_eq!(parse_keys(":"), Some(Command::StartEx));
         assert_eq!(
             parse_keys("/"),
             Some(Command::StartSearch {

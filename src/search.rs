@@ -10,22 +10,6 @@ pub struct Search {
     pub whole_word: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SearchPrompt {
-    pub direction: Direction,
-    pub query: String,
-}
-
-impl SearchPrompt {
-    pub fn display(&self) -> String {
-        let prefix = match self.direction {
-            Direction::Forward => '/',
-            Direction::Backward => '?',
-        };
-        format!("{prefix}{}", self.query)
-    }
-}
-
 pub fn find(
     buffer: &Buffer,
     origin: BufferPosition,

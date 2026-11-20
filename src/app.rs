@@ -5,7 +5,11 @@ use gpui::{
     WindowOptions, prelude::*, px, size,
 };
 
-use crate::{editor::Editor, input::Key, ui};
+use crate::{
+    editor::{Editor, EditorRequest},
+    input::Key,
+    ui,
+};
 
 pub struct EditorApp {
     focus_handle: FocusHandle,
@@ -24,7 +28,7 @@ impl EditorApp {
         }
     }
 
-    fn handle_key(&mut self, key: Key, cx: &mut Context<Self>) {
+    fn handle_key(&mut self, key: Key, cx: &mut Context<Self>) -> Option<EditorRequest> {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.editor.set_system_clipboard(text);
         }
@@ -32,7 +36,9 @@ impl EditorApp {
         if let Some(text) = self.editor.take_system_clipboard_write() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+        let request = self.editor.take_request();
         cx.notify();
+        request
     }
 }
 
@@ -74,10 +80,13 @@ pub fn run() {
             .update(cx, |_editor, _window, cx| cx.entity())
             .expect("ed window closed during startup");
 
-        cx.observe_keystrokes(move |event, _window, cx| {
-            editor.update(cx, |editor, cx| {
-                editor.handle_key(Key::from(&event.keystroke), cx);
+        cx.observe_keystrokes(move |event, window, cx| {
+            let request = editor.update(cx, |editor, cx| {
+                editor.handle_key(Key::from(&event.keystroke), cx)
             });
+            if request == Some(EditorRequest::Close) {
+                window.remove_window();
+            }
         })
         .detach();
 

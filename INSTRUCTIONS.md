@@ -32,6 +32,18 @@ GPUI Keystroke
 
 Do not place Vim semantics directly in GPUI event handlers.
 
+Completed Ex commands follow a parallel core-only path:
+
+```text
+normalized input::Key
+→ minibuffer text
+→ typed ex::ExCommand
+→ Editor execution
+→ Buffer transaction or editor lifecycle request
+```
+
+Parse and validate an entire Ex command before mutating the buffer. Keep GPUI-specific close behavior behind `EditorRequest` rather than importing GPUI into editor core logic.
+
 ## Test strategy
 
 Every new Vim feature needs tests at two levels when practical.

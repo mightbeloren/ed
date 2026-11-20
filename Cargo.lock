@@ -1426,6 +1426,7 @@ name = "ed"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "regex",
  "ropey",
 ]
 
