@@ -3,7 +3,7 @@ pub mod buffer;
 mod editor;
 mod input;
 mod ui;
-mod vim;
+pub mod vim;
 
 fn main() {
     app::run();

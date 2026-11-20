@@ -146,7 +146,7 @@ fn render_cursor_line(text: &str, left: usize, cursor_character: usize, mode: Mo
     let before: String = characters[visible_start..cursor].iter().collect();
 
     match mode {
-        Mode::Normal => {
+        Mode::Normal | Mode::OperatorPending => {
             let cursor_text = characters
                 .get(cursor)
                 .map(char::to_string)

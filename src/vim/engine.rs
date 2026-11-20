@@ -14,9 +14,16 @@ impl VimEngine {
     }
 
     pub fn normal_command(&mut self, key: &Key) -> Option<Command> {
-        (self.mode == Mode::Normal)
-            .then(|| self.normal.parse(key))
-            .flatten()
+        if !matches!(self.mode, Mode::Normal | Mode::OperatorPending) {
+            return None;
+        }
+        let command = self.normal.parse(key);
+        self.mode = if self.normal.is_operator_pending() {
+            Mode::OperatorPending
+        } else {
+            Mode::Normal
+        };
+        command
     }
 
     pub fn enter_insert(&mut self) {

@@ -89,8 +89,16 @@ impl Buffer {
         self.revision != self.saved_revision
     }
 
+    pub fn len_chars(&self) -> usize {
+        self.text.len_chars()
+    }
+
     pub fn len_lines(&self) -> usize {
         self.text.len_lines()
+    }
+
+    pub fn line_start_offset(&self, line: usize) -> Option<CharOffset> {
+        (line < self.text.len_lines()).then(|| CharOffset(self.text.line_to_char(line)))
     }
 
     pub fn line_len_chars(&self, line: usize) -> Option<usize> {
@@ -149,6 +157,11 @@ impl Buffer {
 
     pub fn char_at(&self, offset: CharOffset) -> Option<char> {
         self.text.get_char(offset.0)
+    }
+
+    pub fn text(&self, start: CharOffset, end: CharOffset) -> Option<String> {
+        (start <= end && end.0 <= self.text.len_chars())
+            .then(|| self.text.slice(start.0..end.0).to_string())
     }
 
     pub fn begin_transaction(&mut self) {

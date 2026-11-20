@@ -3,7 +3,11 @@ use std::path::Path;
 use crate::{
     buffer::{Buffer, BufferPosition, CharOffset},
     input::{Key, KeyValue},
-    vim::{Command, InsertPlacement, Mode, Motion, VimEngine},
+    vim::{
+        Command, FindMotion, InsertPlacement, Mode, Motion, Operator, OperatorCommand,
+        RegisterStore, RegisterValue, SelectionShape, Target, VimEngine, resolve_motion,
+        resolve_target,
+    },
 };
 
 const DEFAULT_VISIBLE_ROWS: usize = 24;
@@ -26,6 +30,8 @@ pub struct Editor {
     cursor: Cursor,
     viewport: Viewport,
     vim: VimEngine,
+    registers: RegisterStore,
+    last_find: Option<FindMotion>,
     insert_session_changed: bool,
     visible_rows: usize,
     visible_columns: usize,
@@ -54,6 +60,8 @@ impl Editor {
             cursor: Cursor::default(),
             viewport: Viewport::default(),
             vim: VimEngine::default(),
+            registers: RegisterStore::default(),
+            last_find: None,
             insert_session_changed: false,
             visible_rows: DEFAULT_VISIBLE_ROWS,
             visible_columns: DEFAULT_VISIBLE_COLUMNS,
@@ -94,7 +102,7 @@ impl Editor {
         }
 
         match self.vim.mode() {
-            Mode::Normal => {
+            Mode::Normal | Mode::OperatorPending => {
                 if let Some(command) = self.vim.normal_command(key) {
                     self.execute_normal(command);
                     self.message.clear();
@@ -107,42 +115,235 @@ impl Editor {
     fn execute_normal(&mut self, command: Command) {
         match command {
             Command::Move { motion, count } => self.execute_motion(motion, count),
-            Command::GoToLine { line } => {
-                let line = line.unwrap_or_else(|| self.buffer.len_lines().saturating_sub(1));
-                self.move_to_line(line);
-            }
             Command::EnterInsert(placement) => self.enter_insert(placement),
+            Command::Operate(command) => self.execute_operator(command),
         }
     }
 
     fn execute_motion(&mut self, motion: Motion, count: u32) {
-        let count = count as usize;
-        match motion {
-            Motion::Left => self.move_horizontal(-(count.min(isize::MAX as usize) as isize)),
-            Motion::Down => self.move_vertical(count.min(isize::MAX as usize) as isize),
-            Motion::Up => self.move_vertical(-(count.min(isize::MAX as usize) as isize)),
-            Motion::Right => self.move_horizontal(count.min(isize::MAX as usize) as isize),
-            Motion::LineStart => self.move_to_character(0),
-            Motion::FirstNonBlank => self.move_to_first_non_blank(),
-            Motion::LineEnd => {
-                if count > 1 {
-                    self.move_vertical((count - 1).min(isize::MAX as usize) as isize);
+        let desired = self
+            .cursor
+            .desired_character
+            .unwrap_or(self.cursor.position.character);
+        let Some(outcome) = resolve_motion(
+            &self.buffer,
+            self.cursor.position,
+            desired,
+            motion,
+            count,
+            self.last_find,
+            self.visible_rows,
+        ) else {
+            return;
+        };
+        if let Some(find) = outcome.find {
+            self.last_find = Some(find);
+        }
+        self.cursor.position = outcome.destination;
+        self.cursor.desired_character = if matches!(
+            motion,
+            Motion::Down | Motion::Up | Motion::PageDown | Motion::PageUp | Motion::GoToLine { .. }
+        ) {
+            Some(desired)
+        } else {
+            None
+        };
+        self.ensure_cursor_visible();
+    }
+
+    fn execute_operator(&mut self, mut command: OperatorCommand) {
+        if command.operator == Operator::Change {
+            command.target = match command.target {
+                Target::Motion(Motion::WordForward { big_word }) => {
+                    Target::Motion(Motion::WordEnd { big_word })
                 }
-                self.move_to_line_end();
+                target => target,
+            };
+        }
+        let desired = self
+            .cursor
+            .desired_character
+            .unwrap_or(self.cursor.position.character);
+        let Some(target) = resolve_target(
+            &self.buffer,
+            self.cursor.position,
+            desired,
+            command.target,
+            command.count,
+            self.last_find,
+            self.visible_rows,
+        ) else {
+            return;
+        };
+        if let Target::Motion(Motion::FindCharacter(find)) = command.target {
+            self.last_find = Some(find);
+        }
+
+        match command.operator {
+            Operator::Delete | Operator::Change | Operator::Yank => {
+                let value = RegisterValue {
+                    text: self
+                        .buffer
+                        .text(target.start, target.end)
+                        .unwrap_or_default(),
+                    shape: target.shape,
+                };
+                self.registers.write(command.register, value);
+                match command.operator {
+                    Operator::Delete => self.delete_target(target),
+                    Operator::Change => self.change_target(target),
+                    Operator::Yank => {}
+                    _ => unreachable!(),
+                }
             }
-            Motion::PageUp => {
-                let distance = count
-                    .saturating_mul(self.visible_rows)
-                    .min(isize::MAX as usize);
-                self.move_vertical(-(distance as isize));
+            Operator::Indent | Operator::Outdent | Operator::Reindent => {
+                self.indent_target(target, command.operator)
             }
-            Motion::PageDown => {
-                let distance = count
-                    .saturating_mul(self.visible_rows)
-                    .min(isize::MAX as usize);
-                self.move_vertical(distance as isize);
+            Operator::SwapCase | Operator::Lowercase | Operator::Uppercase => {
+                self.case_target(target, command.operator)
             }
         }
+        self.cursor.desired_character = None;
+        self.ensure_cursor_visible();
+    }
+
+    fn delete_target(&mut self, target: crate::vim::ResolvedTarget) {
+        self.buffer.begin_transaction();
+        if self.buffer.remove(target.start, target.end).is_ok() {
+            let offset = CharOffset(target.start.0.min(self.buffer.len_chars()));
+            self.cursor.position = self.buffer.offset_to_position(offset).unwrap_or_default();
+            self.buffer.commit_transaction();
+            self.clamp_cursor_to_mode();
+        } else {
+            self.buffer.commit_transaction();
+        }
+    }
+
+    fn change_target(&mut self, target: crate::vim::ResolvedTarget) {
+        let had_following_text = target.end.0 < self.buffer.len_chars();
+        self.buffer.begin_transaction();
+        if self.buffer.remove(target.start, target.end).is_err() {
+            self.buffer.commit_transaction();
+            return;
+        }
+        if target.shape == SelectionShape::LineWise && had_following_text {
+            let _ = self.buffer.insert(target.start, "\n");
+        }
+        let offset = CharOffset(target.start.0.min(self.buffer.len_chars()));
+        self.cursor.position = self.buffer.offset_to_position(offset).unwrap_or_default();
+        if target.shape == SelectionShape::LineWise {
+            self.cursor.position.character = 0;
+        }
+        self.insert_session_changed = true;
+        self.vim.enter_insert();
+    }
+
+    fn case_target(&mut self, target: crate::vim::ResolvedTarget, operator: Operator) {
+        let Some(text) = self.buffer.text(target.start, target.end) else {
+            return;
+        };
+        let replacement: String = text
+            .chars()
+            .flat_map(|character| match operator {
+                Operator::SwapCase if character.is_lowercase() => {
+                    character.to_uppercase().collect::<Vec<_>>()
+                }
+                Operator::SwapCase if character.is_uppercase() => {
+                    character.to_lowercase().collect::<Vec<_>>()
+                }
+                Operator::Lowercase => character.to_lowercase().collect(),
+                Operator::Uppercase => character.to_uppercase().collect(),
+                _ => vec![character],
+            })
+            .collect();
+        self.buffer.begin_transaction();
+        let _ = self.buffer.remove(target.start, target.end);
+        let _ = self.buffer.insert(target.start, &replacement);
+        self.buffer.commit_transaction();
+        self.cursor.position = self
+            .buffer
+            .offset_to_position(CharOffset(target.start.0.min(self.buffer.len_chars())))
+            .unwrap_or_default();
+        self.clamp_cursor_to_mode();
+    }
+
+    fn indent_target(&mut self, target: crate::vim::ResolvedTarget, operator: Operator) {
+        let (first_line, last_line) = self.target_lines(target);
+        let mut edits = Vec::new();
+        let mut depth = self.brace_depth_before(first_line);
+        for line in first_line..=last_line {
+            let text = self.buffer.line_text(line).unwrap_or_default();
+            let leading = text
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .count();
+            let (remove, insert) = match operator {
+                Operator::Indent => (0, "    ".to_owned()),
+                Operator::Outdent => {
+                    let remove = if text.starts_with('\t') {
+                        1
+                    } else {
+                        leading.min(4)
+                    };
+                    (remove, String::new())
+                }
+                Operator::Reindent => {
+                    let trimmed = text.trim_start();
+                    let line_depth = if trimmed.starts_with('}') {
+                        depth.saturating_sub(1)
+                    } else {
+                        depth
+                    };
+                    (leading, " ".repeat(line_depth.saturating_mul(4)))
+                }
+                _ => unreachable!(),
+            };
+            edits.push((line, remove, insert));
+            if operator == Operator::Reindent {
+                depth = updated_brace_depth(depth, &text);
+            }
+        }
+
+        self.buffer.begin_transaction();
+        for (line, remove, insert) in edits.into_iter().rev() {
+            let Some(start) = self.buffer.line_start_offset(line) else {
+                continue;
+            };
+            if remove > 0 {
+                let _ = self
+                    .buffer
+                    .remove(start, CharOffset(start.0.saturating_add(remove)));
+            }
+            if !insert.is_empty() {
+                let _ = self.buffer.insert(start, &insert);
+            }
+        }
+        self.buffer.commit_transaction();
+        self.cursor.position = BufferPosition {
+            line: first_line,
+            character: 0,
+        };
+    }
+
+    fn target_lines(&self, target: crate::vim::ResolvedTarget) -> (usize, usize) {
+        let first = self
+            .buffer
+            .offset_to_position(target.start)
+            .unwrap_or_default()
+            .line;
+        let last_offset = CharOffset(target.end.0.saturating_sub(1));
+        let last = self
+            .buffer
+            .offset_to_position(last_offset)
+            .unwrap_or_default()
+            .line;
+        (first, last)
+    }
+
+    fn brace_depth_before(&self, line: usize) -> usize {
+        (0..line).fold(0, |depth, index| {
+            updated_brace_depth(depth, &self.buffer.line_text(index).unwrap_or_default())
+        })
     }
 
     fn enter_insert(&mut self, placement: InsertPlacement) {
@@ -296,20 +497,6 @@ impl Editor {
         self.ensure_cursor_visible();
     }
 
-    fn move_to_line(&mut self, line: usize) {
-        let line = line.min(self.buffer.len_lines().saturating_sub(1));
-        let desired = self
-            .cursor
-            .desired_character
-            .unwrap_or(self.cursor.position.character);
-        self.cursor.position = BufferPosition {
-            line,
-            character: desired.min(self.maximum_character(line)),
-        };
-        self.cursor.desired_character = Some(desired);
-        self.ensure_cursor_visible();
-    }
-
     fn move_to_character(&mut self, character: usize) {
         self.cursor.position.character =
             character.min(self.maximum_character(self.cursor.position.line));
@@ -326,17 +513,6 @@ impl Editor {
             .take_while(|character| character.is_whitespace())
             .count();
         self.move_to_character(character);
-    }
-
-    fn move_to_line_end(&mut self) {
-        let line_length = self.current_line_length();
-        self.cursor.position.character = if self.vim.mode() == Mode::Insert {
-            line_length
-        } else {
-            line_length.saturating_sub(1)
-        };
-        self.cursor.desired_character = None;
-        self.ensure_cursor_visible();
     }
 
     fn current_line_length(&self) -> usize {
@@ -382,6 +558,17 @@ impl Editor {
             self.viewport.left_character = cursor_character + 1 - self.visible_columns;
         }
     }
+}
+
+fn updated_brace_depth(mut depth: usize, text: &str) -> usize {
+    for character in text.chars() {
+        match character {
+            '{' => depth = depth.saturating_add(1),
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
 }
 
 #[cfg(test)]
@@ -589,5 +776,142 @@ mod tests {
         assert_eq!(editor.buffer.line_text(0).as_deref(), Some("first"));
         assert_eq!(editor.buffer.line_text(1).as_deref(), Some("added"));
         assert_eq!(editor.buffer.line_text(2).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn word_motions_distinguish_words_and_punctuation() {
+        let mut editor = editor_with_text("one two.three");
+
+        type_keys(&mut editor, "w");
+        assert_eq!(editor.cursor.position.character, 4);
+        type_keys(&mut editor, "w");
+        assert_eq!(editor.cursor.position.character, 7);
+        type_keys(&mut editor, "e");
+        assert_eq!(editor.cursor.position.character, 12);
+        type_keys(&mut editor, "b");
+        assert_eq!(editor.cursor.position.character, 8);
+    }
+
+    #[test]
+    fn delete_composes_with_word_and_line_targets() {
+        let mut words = editor_with_text("one two three");
+        type_keys(&mut words, "2dw");
+        assert_eq!(words.buffer.line_text(0).as_deref(), Some("three"));
+        let register = words.registers.unnamed().expect("unnamed register");
+        assert_eq!(register.text, "one two ");
+        assert_eq!(register.shape, SelectionShape::CharacterWise);
+
+        let mut lines = editor_with_text("one\ntwo\nthree");
+        type_keys(&mut lines, "2dd");
+        assert_eq!(lines.buffer.line_text(0).as_deref(), Some("three"));
+        assert_eq!(
+            lines.registers.unnamed().expect("unnamed register").shape,
+            SelectionShape::LineWise
+        );
+    }
+
+    #[test]
+    fn change_word_keeps_one_transaction_open_through_insert() {
+        let mut editor = editor_with_text("one two");
+
+        type_keys(&mut editor, "cwnew");
+        editor.handle_key(&named("escape"));
+
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("new two"));
+        assert_eq!(editor.buffer.completed_transaction_count(), 1);
+    }
+
+    #[test]
+    fn yank_and_black_hole_register_follow_operator_targets() {
+        let mut editor = editor_with_text("one two three");
+        type_keys(&mut editor, "yw");
+        assert_eq!(
+            editor.registers.unnamed().expect("unnamed register").text,
+            "one "
+        );
+
+        type_keys(&mut editor, "w\"_dw");
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one three"));
+        assert_eq!(
+            editor.registers.unnamed().expect("unnamed register").text,
+            "one "
+        );
+    }
+
+    #[test]
+    fn case_and_indent_operators_use_generic_targets() {
+        let mut case = editor_with_text("one two");
+        type_keys(&mut case, "gUw");
+        assert_eq!(case.buffer.line_text(0).as_deref(), Some("ONE two"));
+
+        let mut indent = editor_with_text("one\ntwo");
+        type_keys(&mut indent, ">>");
+        assert_eq!(indent.buffer.line_text(0).as_deref(), Some("    one"));
+        type_keys(&mut indent, "<<");
+        assert_eq!(indent.buffer.line_text(0).as_deref(), Some("one"));
+
+        let mut reindent = editor_with_text("{\nfoo\n}");
+        type_keys(&mut reindent, "j==");
+        assert_eq!(reindent.buffer.line_text(1).as_deref(), Some("    foo"));
+    }
+
+    #[test]
+    fn delete_right_at_line_end_still_deletes_the_cursor_character() {
+        let mut editor = editor_with_text("abc");
+        type_keys(&mut editor, "$dl");
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn big_word_and_backward_find_motions_work() {
+        let mut words = editor_with_text("one.two three");
+        type_keys(&mut words, "W");
+        assert_eq!(words.cursor.position.character, 8);
+        type_keys(&mut words, "E");
+        assert_eq!(words.cursor.position.character, 12);
+        type_keys(&mut words, "B");
+        assert_eq!(words.cursor.position.character, 8);
+
+        let mut find = editor_with_text("a x b x");
+        type_keys(&mut find, "$Fx");
+        assert_eq!(find.cursor.position.character, 2);
+        type_keys(&mut find, "$Tx");
+        assert_eq!(find.cursor.position.character, 3);
+    }
+
+    #[test]
+    fn find_repeat_and_matching_delimiter_motions_work() {
+        let mut find = editor_with_text("a x b x");
+        type_keys(&mut find, "fx");
+        assert_eq!(find.cursor.position.character, 2);
+        type_keys(&mut find, ";");
+        assert_eq!(find.cursor.position.character, 6);
+        type_keys(&mut find, ",");
+        assert_eq!(find.cursor.position.character, 2);
+
+        let mut delimiter = editor_with_text("(a(b)c)");
+        type_keys(&mut delimiter, "%");
+        assert_eq!(delimiter.cursor.position.character, 6);
+        type_keys(&mut delimiter, "0d%");
+        assert_eq!(delimiter.buffer.line_text(0).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn escape_cancels_operator_pending_mode() {
+        let mut editor = editor_with_text("one");
+        type_keys(&mut editor, "d");
+        assert_eq!(editor.mode(), Mode::OperatorPending);
+        editor.handle_key(&named("escape"));
+        assert_eq!(editor.mode(), Mode::Normal);
+        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("one"));
+    }
+
+    fn editor_with_text(text: &str) -> Editor {
+        let mut editor = Editor::scratch();
+        editor
+            .buffer
+            .insert(CharOffset(0), text)
+            .expect("valid insertion");
+        editor
     }
 }

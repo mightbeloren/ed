@@ -3,6 +3,7 @@ pub enum Mode {
     #[default]
     Normal,
     Insert,
+    OperatorPending,
 }
 
 impl Mode {
@@ -10,6 +11,7 @@ impl Mode {
         match self {
             Self::Normal => "NORMAL",
             Self::Insert => "INSERT",
+            Self::OperatorPending => "OPERATOR",
         }
     }
 }
