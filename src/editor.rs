@@ -10,7 +10,7 @@ use crate::{
     dired::{self, DiredCommand, DiredState},
     ex::{self, Address, ExCommand, GlobalAction, RangeSeparator, RangeSpec, Substitute},
     input::{Key, KeyValue},
-    minibuffer::{Minibuffer, MinibufferKind, ShellCommandCompletion},
+    minibuffer::{Minibuffer, MinibufferKind, ShellPathCompletion},
     navigation::{ChangeList, JumpList},
     output::{JumpTarget, OutputState},
     search::{self, Search},
@@ -218,6 +218,27 @@ impl Editor {
         self.request.take()
     }
 
+    pub fn append_shell_output(&mut self, request_id: u64, text: &str) {
+        if text.is_empty()
+            || !self
+                .output
+                .as_ref()
+                .is_some_and(|output| output.is_running_request(request_id))
+        {
+            return;
+        }
+        if self
+            .buffer
+            .insert(CharOffset(self.buffer.len_chars()), text)
+            .is_err()
+        {
+            return;
+        }
+        self.cursor.position.line = self.buffer.len_lines().saturating_sub(1);
+        self.cursor.position.character = self.maximum_character(self.cursor.position.line);
+        self.ensure_cursor_visible();
+    }
+
     pub fn finish_shell(&mut self, completion: ShellCompletion, open_immediately: bool) {
         if open_immediately {
             let request_id = completion.request.id;
@@ -235,6 +256,7 @@ impl Editor {
         }
         let (buffer, output) = OutputState::from_completion(completion);
         self.replace_buffer(buffer, None, Some(output));
+        self.cursor.position.line = 1.min(self.buffer.len_lines().saturating_sub(1));
         self.message = "Shell command finished".to_owned();
     }
 
@@ -1340,14 +1362,17 @@ impl Editor {
                 }
             }
             KeyValue::Named(name) if name == "tab" => {
-                let completion = self.minibuffer.as_mut().map_or(
-                    ShellCommandCompletion::None,
-                    Minibuffer::complete_shell_command,
-                );
+                let cwd = self.working_directory();
+                let completion = self
+                    .minibuffer
+                    .as_mut()
+                    .map_or(ShellPathCompletion::None, |minibuffer| {
+                        minibuffer.complete_shell_path(&cwd)
+                    });
                 self.message = match completion {
-                    ShellCommandCompletion::None => "No shell command completion".to_owned(),
-                    ShellCommandCompletion::Completed => String::new(),
-                    ShellCommandCompletion::Candidates(candidates) => {
+                    ShellPathCompletion::None => "No file completion".to_owned(),
+                    ShellPathCompletion::Completed => String::new(),
+                    ShellPathCompletion::Candidates(candidates) => {
                         let visible = candidates
                             .into_iter()
                             .take(8)
@@ -1597,6 +1622,7 @@ impl Editor {
                 if open_immediately {
                     let (buffer, output) = OutputState::running(&request);
                     self.replace_buffer(buffer, None, Some(output));
+                    self.cursor.position.line = 1.min(self.buffer.len_lines().saturating_sub(1));
                 }
                 self.request = Some(EditorRequest::RunShell {
                     request,
@@ -1729,7 +1755,7 @@ impl Editor {
             self.request = Some(EditorRequest::Close);
             return;
         }
-        if self.buffer.is_modified() && !force {
+        if !self.is_read_only_special() && self.buffer.is_modified() && !force {
             self.message = "No write since last change (add ! to override)".to_owned();
             return;
         }
@@ -1784,7 +1810,7 @@ impl Editor {
     }
 
     fn edit_ex(&mut self, path: Option<&str>, force: bool) {
-        if self.buffer.is_modified() && !force {
+        if !self.is_read_only_special() && self.buffer.is_modified() && !force {
             self.message = "No write since last change (add ! to override)".to_owned();
             return;
         }
@@ -3182,7 +3208,7 @@ mod tests {
         assert!(editor.display_name().contains("[running]"));
         assert_eq!(
             editor.buffer.line_text(0).as_deref(),
-            Some("(command running...)")
+            Some("$ printf output")
         );
         let request = match editor.take_request() {
             Some(EditorRequest::RunShell {
@@ -3191,6 +3217,8 @@ mod tests {
             }) => request,
             other => panic!("expected immediate shell request, got {other:?}"),
         };
+        editor.append_shell_output(request.id, "output");
+        assert_eq!(editor.buffer.line_text(1).as_deref(), Some("output"));
         editor.finish_shell(
             ShellCompletion {
                 request,
@@ -3205,7 +3233,11 @@ mod tests {
 
         assert!(editor.is_output());
         assert!(editor.display_name().contains("exit 0, ok"));
-        assert_eq!(editor.buffer.line_text(0).as_deref(), Some("output"));
+        assert_eq!(
+            editor.buffer.line_text(0).as_deref(),
+            Some("$ printf output")
+        );
+        assert_eq!(editor.buffer.line_text(1).as_deref(), Some("output"));
 
         fs::remove_dir_all(directory).expect("remove test directory");
     }
@@ -3224,6 +3256,7 @@ mod tests {
             }) => request,
             other => panic!("expected immediate shell request, got {other:?}"),
         };
+        editor.append_shell_output(request.id, "partial output");
         execute_ex_keys(&mut editor, "q");
         assert!(editor.is_dired());
 
@@ -3279,6 +3312,11 @@ mod tests {
 
         assert!(editor.is_output());
         assert!(editor.display_name().contains("exit 1, failed"));
+        assert_eq!(
+            editor.buffer.line_text(0).as_deref(),
+            Some("$ printf main.rs:3:2")
+        );
+        assert_eq!(editor.cursor.position.line, 1);
         type_keys(&mut editor, "x");
         assert_eq!(editor.message(), "Output buffers are read-only");
         editor.handle_key(&named("enter"));

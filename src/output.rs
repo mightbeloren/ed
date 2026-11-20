@@ -38,7 +38,7 @@ enum OutputStatus {
 impl OutputState {
     pub fn running(request: &crate::shell::ShellRequest) -> (Buffer, Self) {
         (
-            Buffer::from_text("(command running...)"),
+            Buffer::from_text(&format!("$ {}\n", request.command)),
             Self {
                 request_id: request.id,
                 command: request.command.clone(),
@@ -65,12 +65,13 @@ impl OutputState {
         if output.is_empty() {
             output = "(no output)".to_owned();
         }
-        let targets = output
+        let text = format!("$ {command}\n{output}");
+        let targets = text
             .lines()
             .map(|line| parse_jump_target(line, &cwd))
             .collect();
         (
-            Buffer::from_text(&output),
+            Buffer::from_text(&text),
             Self {
                 request_id,
                 command,

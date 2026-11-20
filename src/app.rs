@@ -8,7 +8,7 @@ use gpui::{
 use crate::{
     editor::{Editor, EditorRequest},
     input::Key,
-    shell::{self, ShellRequest},
+    shell::{self, ShellRequest, ShellStreamEvent},
     ui,
 };
 
@@ -52,17 +52,47 @@ impl EditorApp {
     }
 
     fn run_shell(request: ShellRequest, open_immediately: bool, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let completion = cx
-                .background_executor()
-                .spawn(async move { shell::run(request) })
-                .await;
-            let _ = this.update(cx, move |app, cx| {
-                app.editor.finish_shell(completion, open_immediately);
-                cx.notify();
-            });
-        })
-        .detach();
+        if open_immediately {
+            let (sender, receiver) = async_channel::unbounded();
+            cx.background_executor()
+                .spawn(async move { shell::run_streaming(request, sender) })
+                .detach();
+            cx.spawn(async move |this, cx| {
+                while let Ok(event) = receiver.recv().await {
+                    let finished = matches!(event, ShellStreamEvent::Finished(_));
+                    if this
+                        .update(cx, move |app, cx| {
+                            match event {
+                                ShellStreamEvent::Chunk { request_id, text } => {
+                                    app.editor.append_shell_output(request_id, &text);
+                                }
+                                ShellStreamEvent::Finished(completion) => {
+                                    app.editor.finish_shell(completion, true);
+                                }
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                        || finished
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        } else {
+            cx.spawn(async move |this, cx| {
+                let completion = cx
+                    .background_executor()
+                    .spawn(async move { shell::run(request) })
+                    .await;
+                let _ = this.update(cx, move |app, cx| {
+                    app.editor.finish_shell(completion, false);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 }
 

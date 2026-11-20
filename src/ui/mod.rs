@@ -38,7 +38,7 @@ pub fn render(editor: &Editor, focused: bool, visible_rows: usize) -> Div {
         )
     });
 
-    let modified = if editor.buffer().is_modified() {
+    let modified = if !editor.is_dired() && !editor.is_output() && editor.buffer().is_modified() {
         " [+]"
     } else {
         ""

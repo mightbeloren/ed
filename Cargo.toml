@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+async-channel = "=2.5.0"
 gpui = "=0.2.2"
 regex = "=1.13.2"
 ropey = "=1.6.1"

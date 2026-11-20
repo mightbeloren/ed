@@ -1,14 +1,9 @@
-use std::{
-    collections::BTreeSet,
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 use crate::vim::Direction;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ShellCommandCompletion {
+pub enum ShellPathCompletion {
     None,
     Completed,
     Candidates(Vec<String>),
@@ -50,47 +45,62 @@ impl Minibuffer {
         format!("{prefix}{}", self.text)
     }
 
-    pub fn complete_shell_command(&mut self) -> ShellCommandCompletion {
-        let Some(path) = std::env::var_os("PATH") else {
-            return ShellCommandCompletion::None;
-        };
-        let directories: Vec<PathBuf> = std::env::split_paths(&path).collect();
-        self.complete_shell_command_from_paths(&directories)
-    }
-
-    fn complete_shell_command_from_paths(
-        &mut self,
-        directories: &[PathBuf],
-    ) -> ShellCommandCompletion {
+    pub fn complete_shell_path(&mut self, cwd: &Path) -> ShellPathCompletion {
         if self.kind != MinibufferKind::Ex {
-            return ShellCommandCompletion::None;
+            return ShellPathCompletion::None;
         }
-        let Some((start, prefix)) = shell_command_prefix(&self.text) else {
-            return ShellCommandCompletion::None;
+        let Some((start, prefix)) = shell_path_prefix(&self.text) else {
+            return ShellPathCompletion::None;
         };
-        let candidates = executable_candidates(prefix, directories);
+        let (directory_prefix, name_prefix) = prefix.rfind('/').map_or(("", prefix), |index| {
+            (&prefix[..=index], &prefix[index + 1..])
+        });
+        let directory = cwd.join(directory_prefix);
+        let Ok(entries) = fs::read_dir(directory) else {
+            return ShellPathCompletion::None;
+        };
+        let mut candidates = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.starts_with(name_prefix)
+                    || (!name_prefix.starts_with('.') && name.starts_with('.'))
+                {
+                    return None;
+                }
+                let suffix = if entry.file_type().ok()?.is_dir() {
+                    "/"
+                } else {
+                    ""
+                };
+                Some(format!("{directory_prefix}{name}{suffix}"))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
         if candidates.is_empty() {
-            return ShellCommandCompletion::None;
+            return ShellPathCompletion::None;
         }
-        if candidates.iter().any(|candidate| candidate == prefix) {
-            self.text.push(' ');
-            return ShellCommandCompletion::Completed;
+
+        let exact = candidates
+            .iter()
+            .find(|candidate| candidate.as_str() == prefix);
+        let replacement = exact.cloned().unwrap_or_else(|| common_prefix(&candidates));
+        if replacement.len() > prefix.len() {
+            self.text.replace_range(start.., &replacement);
         }
-        let common = common_prefix(&candidates);
-        if common.len() > prefix.len() {
-            self.text.replace_range(start.., &common);
-        }
-        if candidates.len() == 1 {
-            self.text.push(' ');
-            ShellCommandCompletion::Completed
+        if exact.is_some() || candidates.len() == 1 {
+            if !self.text.ends_with('/') {
+                self.text.push(' ');
+            }
+            ShellPathCompletion::Completed
         } else {
-            ShellCommandCompletion::Candidates(candidates)
+            ShellPathCompletion::Candidates(candidates)
         }
     }
 }
 
-fn shell_command_prefix(text: &str) -> Option<(usize, &str)> {
-    let start = if let Some(rest) = text.strip_prefix('!') {
+fn shell_path_prefix(text: &str) -> Option<(usize, &str)> {
+    let body_start = if let Some(rest) = text.strip_prefix('!') {
         1 + (rest.len() - rest.trim_start().len())
     } else {
         let rest = text.strip_prefix("run")?;
@@ -99,30 +109,11 @@ fn shell_command_prefix(text: &str) -> Option<(usize, &str)> {
         }
         3 + (rest.len() - rest.trim_start().len())
     };
+    let body = &text[body_start..];
+    let argument_separator = body.rfind(char::is_whitespace)?;
+    let start = body_start + argument_separator + 1;
     let prefix = &text[start..];
-    (!prefix.is_empty() && !prefix.chars().any(char::is_whitespace)).then_some((start, prefix))
-}
-
-fn executable_candidates(prefix: &str, directories: &[PathBuf]) -> Vec<String> {
-    let mut candidates = BTreeSet::new();
-    for directory in directories {
-        let Ok(entries) = fs::read_dir(directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(prefix) || !is_executable(&entry.path()) {
-                continue;
-            }
-            candidates.insert(name);
-        }
-    }
-    candidates.into_iter().collect()
-}
-
-fn is_executable(path: &Path) -> bool {
-    path.metadata()
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    (!prefix.chars().any(char::is_whitespace)).then_some((start, prefix))
 }
 
 fn common_prefix(values: &[String]) -> String {
@@ -149,38 +140,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn completes_shell_commands_for_bang_and_run_prompts() {
+    fn completes_file_arguments_for_bang_and_run_prompts() {
         let directory = std::env::temp_dir().join(format!(
-            "ed-shell-completion-{}-{}",
+            "ed-shell-path-completion-{}-{}",
             process::id(),
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time after Unix epoch")
                 .as_nanos()
         ));
-        fs::create_dir(&directory).expect("create completion directory");
-        for name in ["cargo", "cat"] {
-            let path = directory.join(name);
-            fs::write(&path, "#!/bin/sh\n").expect("write executable fixture");
-            let mut permissions = fs::metadata(&path).expect("fixture metadata").permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(path, permissions).expect("mark fixture executable");
-        }
-        fs::write(directory.join("calendar"), "not executable").expect("write ignored fixture");
+        let source = directory.join("src");
+        fs::create_dir_all(&source).expect("create completion directory");
+        fs::write(source.join("file.txt"), "contents").expect("write file fixture");
+        fs::write(source.join("filter.rs"), "contents").expect("write second fixture");
 
-        let mut bang = Minibuffer::ex("!car");
+        let mut bang = Minibuffer::ex("!cat src/file");
         assert_eq!(
-            bang.complete_shell_command_from_paths(std::slice::from_ref(&directory)),
-            ShellCommandCompletion::Completed
+            bang.complete_shell_path(&directory),
+            ShellPathCompletion::Completed
         );
-        assert_eq!(bang.text, "!cargo ");
+        assert_eq!(bang.text, "!cat src/file.txt ");
 
-        let mut run = Minibuffer::ex("run ca");
+        let mut run = Minibuffer::ex("run cat src/fi");
         assert_eq!(
-            run.complete_shell_command_from_paths(std::slice::from_ref(&directory)),
-            ShellCommandCompletion::Candidates(vec!["cargo".to_owned(), "cat".to_owned()])
+            run.complete_shell_path(&directory),
+            ShellPathCompletion::Candidates(vec![
+                "src/file.txt".to_owned(),
+                "src/filter.rs".to_owned()
+            ])
         );
-        assert_eq!(run.text, "run ca");
+        assert_eq!(run.text, "run cat src/fil");
+
+        let mut command = Minibuffer::ex("!ca");
+        assert_eq!(
+            command.complete_shell_path(&directory),
+            ShellPathCompletion::None
+        );
+        assert_eq!(command.text, "!ca");
 
         fs::remove_dir_all(directory).expect("remove completion directory");
     }
