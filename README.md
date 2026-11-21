@@ -1,5 +1,8 @@
 # ed
 
+[![CI](https://github.com/mightbeloren/ed/actions/workflows/ci.yml/badge.svg)](https://github.com/mightbeloren/ed/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mightbeloren/ed?display_name=tag)](https://github.com/mightbeloren/ed/releases)
+
 A Vim-first, keyboard-only text editor for Linux, built in Rust with GPUI.
 
 The project is implemented one validated, committed phase at a time. **Phase 11 is complete.**
@@ -23,6 +26,12 @@ cargo run -- path/to/file
 ```
 
 Without a path, `ed` opens a Dired buffer for the current working directory. Passing a directory opens it in Dired; passing a file opens that file. `Ctrl-s` and `:w` atomically save opened files.
+
+## Releases
+
+Versioned Linux x86-64 archives and SHA-256 checksums are published on the [GitHub Releases page](https://github.com/mightbeloren/ed/releases). Releases use annotated tags matching the package version in `Cargo.toml`, such as `v0.1.0`.
+
+Each pull request must pass formatting, tests, strict Clippy, whitespace checks, and a release build. The CI run also provides a temporary downloadable Linux binary. The protected `main` branch accepts changes only through pull requests with required checks; phase work belongs on a dedicated branch.
 
 ## Implemented Vim behavior
 

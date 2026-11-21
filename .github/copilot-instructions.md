@@ -48,7 +48,9 @@ Refresh project diagnostics as well. The transitive `proc-macro-error2` future-c
 
 ## Git
 
-- Main branch: `main`
+- Main branch: `main`; never push phase development directly to it.
+- Use one branch and pull request per phase, and require the `CI / quality` check before merge.
 - Phase commit format: `phase N: short description`
+- Release tags use immutable `vX.Y.Z` versions matching `Cargo.toml`.
 - Do not rewrite user work or commit unrelated changes.
 - Do not claim manual GUI validation unless the GUI was launched and exercised.

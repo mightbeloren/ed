@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: linux-x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Verify tag matches Cargo version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          PACKAGE_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          test "${RELEASE_TAG}" = "v${PACKAGE_VERSION}"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --all-targets --locked
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Linux artifact
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist/package
+          install -m 755 target/release/ed dist/package/ed
+          cp README.md dist/package/README.md
+          tar -C dist/package -czf "dist/ed-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz" ed README.md
+          cd dist
+          sha256sum "ed-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz" > "ed-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ed-${{ github.ref_name }}-linux-x86_64
+          path: |
+            dist/ed-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+            dist/ed-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "${RELEASE_TAG}" \
+            "dist/ed-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz" \
+            "dist/ed-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz.sha256" \
+            --verify-tag \
+            --generate-notes \
+            --title "ed ${RELEASE_TAG}"

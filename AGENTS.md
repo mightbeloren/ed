@@ -113,7 +113,11 @@ The transitive `proc-macro-error2` future-compatibility notice comes from GPUI's
 
 ## Git
 
-- Main branch: `main`
+- Public repository: `https://github.com/mightbeloren/ed`
+- Main branch: `main`; it is protected and must not receive direct development pushes.
+- Create a dedicated branch and pull request for each phase.
+- Merge only after the required `CI / quality` check passes.
 - Do not rewrite or remove user work.
 - Do not commit unrelated changes.
 - Phase commit convention: `phase N: short description`
+- Release tags are immutable annotated `vX.Y.Z` tags matching `Cargo.toml`; the release workflow publishes Linux x86-64 archives and checksums.
