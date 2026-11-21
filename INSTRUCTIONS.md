@@ -13,8 +13,17 @@ This document is the continuation checklist for future implementation sessions.
    ```
 
 3. Confirm which single roadmap phase is next.
-4. Read the affected modules before editing.
-5. Keep the phase scope explicit; do not pull later features forward unless a prerequisite requires it.
+4. Create or switch to a dedicated phase branch, for example `phase/12-file-buffers`; never develop directly on `main`.
+5. Read the affected modules before editing.
+6. Keep the phase scope explicit; do not pull later features forward unless a prerequisite requires it.
+
+## GitHub workflow
+
+The public repository is `https://github.com/mightbeloren/ed`. `main` is protected: changes go through pull requests and the required `CI / quality` check must pass before merge. Use one branch and one focused pull request per roadmap phase. Do not force-push shared phase branches or bypass branch protection.
+
+CI runs formatting, all-target tests, strict Clippy, whitespace validation, and a release build. Successful runs upload a temporary Linux x86-64 binary artifact. Do not treat a local pass as a substitute for the required GitHub check.
+
+Version releases are separate from phase pull requests. After a phase intended for release is merged and `Cargo.toml` contains the intended version, create and push an annotated `vX.Y.Z` tag from the protected `main` commit. The Release workflow verifies that the tag matches `Cargo.toml`, reruns tests and Clippy, builds the Linux archive, generates a SHA-256 checksum, and publishes both files on GitHub Releases. Never move or reuse a published version tag.
 
 ## Core execution path
 
