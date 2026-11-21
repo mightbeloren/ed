@@ -108,7 +108,7 @@ Ex matching currently uses Rust regex syntax rather than Vim's distinct regex di
 - `:q`, `:q!`, and successful `:wq` return file buffers to their containing directory
 - `:q` from Dired closes the editor window
 
-Dired intentionally remains read-only. Emacs-style writable Dired (`wdired`) would be a later, dedicated filesystem-operation phase with validated rename operations rather than saving edited listing text.
+Dired currently remains read-only. Phase 13 will add richer filesystem and directory summaries, `LS_COLORS`-compatible styling, marked operations, file/directory creation, copy/move/delete, and an explicit writable Dired mode with validated rename operations rather than saving arbitrary listing text.
 
 ### Shell commands and output buffers
 
@@ -126,6 +126,8 @@ Dired intentionally remains read-only. Emacs-style writable Dired (`wdired`) wou
 - Modified file buffers must be written or discarded before `:run` replaces them; background `:!cmd` is allowed without writing
 
 `:run` uses Linux util-linux `/usr/bin/script` to allocate a PTY, so programs detect a terminal and flush terminal-oriented output in real time. ANSI control sequences are removed and carriage-return redraws become readable transcript lines. This is a PTY-backed command transcript, not a fully interactive terminal emulator: keyboard input is not forwarded to the child and terminal colors/cursor positioning are not rendered. File completion and target parsing currently focus on whitespace-delimited shell/compiler formats; quoting, escaped spaces, and paths containing spaces are not comprehensively supported.
+
+Phase 14 will replace `:!cmd`, `:run`, and transcript buffers with one persistent bottom terminal panel toggled by `Ctrl-Backtick`. The panel will own a direct PTY, remain alive while hidden, accept interactive input, and interpret terminal ANSI control sequences. Program-supplied 16-color, 256-color, and truecolor output will be preserved; the neutral dark palette supplies the default terminal foreground, background, cursor, and fallback ANSI colors.
 
 ## Runtime syntax plugins
 
@@ -163,9 +165,27 @@ string = "#ce9178"
 
 Capture lookup falls back through dotted parents, so `function.call` uses `function` when no exact mapping exists. A built-in neutral dark theme is used when no theme exists or the theme is invalid. Broken language plugins are reported without preventing the editor from starting. See `examples/language-plugin/` and `examples/theme.toml` for templates.
 
-Language plugins and the theme are loaded only when `ed` starts, so changes require a restart. Parsing currently reparses the full buffer after each edit; incremental parsing and large-file profiling are Phase 12 work.
+Language plugins and the theme are loaded only when `ed` starts, so changes require a restart. Parsing currently reparses the full buffer after each edit; incremental parsing and large-file profiling are Phase 15 work.
 
 **Security and compatibility:** a grammar `.so` is trusted native code, not sandboxed data. Loading one can execute arbitrary code or crash the process. `ed` validates the Tree-sitter language ABI version, but plugin authors are still responsible for compiling a compatible grammar and matching query. Install plugins only from sources you trust.
+
+## Planned workspace navigation
+
+Phase 12 introduces a real open-buffer manager. Every file and Dired buffer will retain its own cursor, viewport, Vim state, undo history, syntax state, and modified state.
+
+- `Ctrl-Tab` selects the next buffer in most-recently-used order.
+- `Ctrl-Shift-Tab` selects the previous buffer.
+- `Ctrl-p` opens or reuses Dired at the workspace root; it does not open a fuzzy finder or graphical file picker. File selection continues through normal keyboard-driven Dired navigation.
+- The workspace root is the startup directory, an explicitly opened directory, the containing Git root when one is available, or otherwise the opened file's parent directory.
+- `:q` closes the active buffer with modified-buffer protection and selects the previous buffer; the window closes only when no buffers remain.
+
+## Planned rich Dired
+
+Phase 13 keeps Dired as a structured Rope-backed buffer while adding an Emacs-like header and metadata columns: directory path, entry counts, apparent size, filesystem availability, permissions, link count, owner, group, size, modification time, filename, and symlink target.
+
+Filename colors will interpret the standard `LS_COLORS` environment variable, including terminal 16-color, 256-color, and truecolor entries, so Dired matches the user's terminal `ls` colors without executing or parsing `ls` output. Missing or invalid `LS_COLORS` entries fall back to the existing neutral dark palette. Metadata, marks, selections, diagnostics, and the cursor retain editor-owned styles.
+
+Dired operations will include marked deletion, create file/directory, copy, move/rename, refresh, and writable-Dired filename editing. Filesystem changes must be represented as validated operations with collision checks and confirmation for destructive or recursive actions.
 
 ## UI
 
@@ -194,8 +214,11 @@ There are intentionally no menus, toolbar, file-picker dialogs, or mouse-driven 
 | 9 | **Complete** | Dired directory buffers, startup browsing, file-return quit behavior |
 | 10 | **Complete** | Async shell runner, read-only output buffers, path jump targets |
 | 11 | **Complete** | Runtime Tree-sitter language plugins and capture-based themes |
-| 12 | Next | Vim compatibility hardening, Unicode/large-file testing, profiling |
+| 12 | Next | Open-buffer manager, MRU `Ctrl-Tab` navigation, workspace-root Dired through `Ctrl-p` |
+| 13 | Planned | Rich `LS_COLORS` Dired, metadata, marks, create/copy/move/delete, writable Dired |
+| 14 | Planned | Persistent `Ctrl-Backtick` terminal panel, direct PTY, ANSI emulation; remove `:!` and `:run` |
+| 15 | Planned | Vim compatibility hardening, incremental syntax, Unicode/large-file testing, profiling |
 
-Vim compatibility hardening, incremental syntax parsing, Unicode/large-file testing, and profiling are the next implementation checkpoint in Phase 12.
+The next implementation checkpoint is Phase 12: open-buffer lifecycle and keyboard navigation. Each later phase remains a separate validated commit.
 
 See `AGENTS.md` for architecture constraints and `INSTRUCTIONS.md` for the development and testing workflow.

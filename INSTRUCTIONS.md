@@ -78,7 +78,17 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/ed/languages/*/language.toml
 
 Keep `plugin` and `syntax` independent from GPUI, and never load files or parse source during `Render`. Dynamic grammar loading is the project's narrow unsafe boundary: grammar libraries are trusted native code, symbol pointers must be checked, and the `Library` must outlive every `Language` and `Query` derived from it. Preserve the `LanguagePlugin` field/drop order so the query and language drop before the library unloads. Tree-sitter reports UTF-8 byte offsets; never pass them directly to Rope character offsets or UI columns. Invalid plugins and themes must produce actionable errors while allowing startup with the built-in theme and remaining valid plugins.
 
-Phase 11 intentionally reparses the complete buffer after each revision. Incremental `Tree::edit`, background parsing, cancellation, and large-file performance work belong to Phase 12. Tests must construct an in-memory/static registry and must not read the developer's real `~/.config/ed` directory.
+Phase 11 intentionally reparses the complete buffer after each revision. Incremental `Tree::edit`, background parsing, cancellation, and large-file performance work belong to Phase 15. Tests must construct an in-memory/static registry and must not read the developer's real `~/.config/ed` directory.
+
+## Planned Phase 12–15 architecture
+
+Phase 12 introduces a core `BufferManager` with stable buffer IDs and most-recently-used ordering. Each managed buffer owns its cursor, viewport, Vim state, undo history, syntax state, modified state, and optional Dired state. `Ctrl-Tab` and `Ctrl-Shift-Tab` traverse MRU buffers. Global `Ctrl-p` opens or reuses workspace-root Dired; it must not introduce a fuzzy finder or graphical file picker. Preserve modified-buffer protection and define application close as closing the final managed buffer.
+
+Phase 13 expands Dired metadata and filesystem operations. Read directory entries and metadata through filesystem APIs, never by parsing `ls`. Resolve filename styling through `LS_COLORS`, including indexed and truecolor values, with the neutral palette as fallback. Keep metadata and row spans separate from listing text. Writable Dired edits only filename fields and turns differences into validated rename operations. Create, copy, move, and delete operations require collision checks; recursive/destructive actions require confirmation. Test all filesystem behavior in unique temporary directories, including symlinks and partial failures.
+
+Phase 14 removes `:!cmd`, `:run`, transcript output buffers, and their completion path after the replacement is ready. A terminal session is persistent UI state, not an editor buffer: `Ctrl-Backtick` toggles visibility/focus while the child and scrollback remain alive. Own the PTY directly, resize it with the panel, process I/O off the UI thread, and feed output into a terminal state machine. Render the child's actual ANSI 16-color, 256-color, and truecolor attributes; use the neutral palette only for terminal defaults/fallbacks. Never parse terminal display rows as shell output. Keep PTY/process code independent from GPUI and expose renderable terminal cells/state to `ui`.
+
+Phase 15 performs Vim compatibility hardening, incremental syntax parsing, Unicode and large-file tests, profiling, and cleanup. Do not pull these scopes into earlier phase commits unless an earlier phase requires a narrowly documented prerequisite.
 
 ## Test strategy
 

@@ -32,6 +32,8 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 - Treat byte offsets, Rope character offsets, buffer line/character positions, and display columns as distinct concepts.
 - The current editor intentionally has no soft wrapping.
 - The cursor line uses its absolute 1-based line number; other visible lines use relative numbers.
+- Planned Dired colors interpret `LS_COLORS` semantically; do not execute or parse `ls` output to determine entries or styling.
+- Planned terminal rendering interprets child-process ANSI state from a directly owned PTY. Keep terminal process/state management separate from editor buffers and GPUI rendering.
 
 ## Current phase
 
@@ -77,7 +79,7 @@ Phase 11 is complete:
 - Unicode-safe conversion from Tree-sitter byte spans to UI character spans
 - Syntax colors in Normal/Insert/Visual rendering and the active language in the status bar
 
-Phase 12 is next: Vim compatibility hardening, incremental syntax parsing, Unicode/large-file testing, and profiling. See `README.md` for the complete roadmap.
+Phase 12 is next: add a real open-buffer manager, MRU navigation with `Ctrl-Tab` / `Ctrl-Shift-Tab`, and workspace-root Dired opening with `Ctrl-p`. `Ctrl-p` is not a fuzzy finder. See `README.md` for Phases 13–15 and the complete roadmap.
 
 ## Phase discipline
 
