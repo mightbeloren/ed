@@ -34,6 +34,8 @@ All UI text uses the system-installed `JetBrains Mono` font. The palette is a ne
 - The cursor line uses its absolute 1-based line number; other visible lines use relative numbers.
 - Planned Dired colors interpret `LS_COLORS` semantically; do not execute or parse `ls` output to determine entries or styling.
 - Planned terminal rendering interprets child-process ANSI state from a directly owned PTY. Keep terminal process/state management separate from editor buffers and GPUI rendering.
+- Open-file navigation and special-buffer lifecycle are distinct: `Ctrl-Tab` / `Ctrl-Shift-Tab` cycle only ordinary file buffers.
+- Planned global `Ctrl-p` opens a recursive workspace file finder in the minibuffer; it does not open Dired or a graphical file picker.
 
 ## Current phase
 
@@ -79,7 +81,7 @@ Phase 11 is complete:
 - Unicode-safe conversion from Tree-sitter byte spans to UI character spans
 - Syntax colors in Normal/Insert/Visual rendering and the active language in the status bar
 
-Phase 12 is next: add a real open-buffer manager, MRU navigation with `Ctrl-Tab` / `Ctrl-Shift-Tab`, and workspace-root Dired opening with `Ctrl-p`. `Ctrl-p` is not a fuzzy finder. See `README.md` for Phases 13–15 and the complete roadmap.
+Phase 12 is next: manage ordinary open file buffers and provide complete wrapping navigation with `Ctrl-Tab` / `Ctrl-Shift-Tab`. Dired, scratch, output, and other special buffers must not appear in that cycle. Phase 12 does not implement `Ctrl-p`; Phase 13 adds a recursive workspace file finder through the minibuffer. See `README.md` for Phases 13–16 and the complete roadmap.
 
 ## Phase discipline
 

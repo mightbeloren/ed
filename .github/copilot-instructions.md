@@ -17,8 +17,9 @@ Before changing this repository, read `AGENTS.md`, `README.md`, and `INSTRUCTION
 - Keep byte offsets, Rope character offsets, buffer positions, and display columns distinct.
 - Use JetBrains Mono and the existing neutral dark palette for all UI.
 - Do not add mouse-driven editing or soft wrapping.
-- Follow the active roadmap exactly: Phase 12 is buffer management and keyboard navigation; Phase 13 is rich/writable Dired; Phase 14 is the persistent terminal panel; Phase 15 is final hardening.
-- `Ctrl-p` opens workspace-root Dired rather than a fuzzy finder or graphical file picker.
+- Follow the active roadmap exactly: Phase 12 is ordinary file-buffer navigation; Phase 13 is the recursive minibuffer file finder; Phase 14 is rich/writable Dired; Phase 15 is the persistent terminal panel; Phase 16 is final hardening.
+- `Ctrl-Tab` and `Ctrl-Shift-Tab` cycle only ordinary file buffers; Dired, scratch, output, and other special buffers are excluded.
+- Global `Ctrl-p` opens the recursive workspace file finder in the minibuffer; it does not open Dired or a graphical file picker.
 - Dired styling interprets `LS_COLORS` over filesystem metadata; never parse `ls` output.
 - Terminal colors come from interpreted child-process ANSI state over a direct PTY; terminal session state is not an editor buffer.
 
